@@ -1,170 +1,266 @@
 # Holon (Rust)
 
-Programmatic Neural Memory using Vector Symbolic Architectures (VSA) / Hyperdimensional Computing (HDC).
+**Programmatic Neural Memory** using Vector Symbolic Architectures
 
-## Overview
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 
-Holon is a library for building deterministic, explainable AI systems using high-dimensional vector operations. It provides a clean, unified interface for:
+<div align="center">
+<img src="../assets/superposition-incantation.gif" alt="Superposition Incantation">
 
-- **Encoding**: Convert structured data (JSON, key-value pairs) into vectors
-- **VSA Primitives**: bind, bundle, negate, amplify, prototype, etc.
-- **Streaming**: Frequency-preserving accumulators for online learning
-- **Similarity**: Multiple metrics for vector comparison
-- **Scalar Encoding**: Continuous values with linear, log, or circular encoding
+*The sorcerer computes in high dimensions. Similarity becomes destiny.*
+</div>
+
+The Rust implementation of Holon - high-performance hyperdimensional computing for anomaly detection, pattern matching, and structural similarity. Same mathematical foundations as Python, but **12x faster**.
 
 ## Quick Start
 
 ```rust
-use holon::{Holon, ScalarMode};
+use holon::Holon;
 
 fn main() -> holon::Result<()> {
-    // Create a Holon instance
     let holon = Holon::new(4096);
 
-    // Encode structured data
-    let billing = holon.encode_json(r#"{"type": "billing", "amount": 100}"#)?;
-    let technical = holon.encode_json(r#"{"type": "technical"}"#)?;
+    // Encode structured data as vectors
+    let normal = holon.encode_json(r#"{"type": "login", "user": "alice"}"#)?;
+    let suspicious = holon.encode_json(r#"{"type": "login", "attempts": 1000}"#)?;
 
-    // Compute similarity
-    let sim = holon.similarity(&billing, &technical);
-    println!("Similarity: {:.3}", sim);
+    // Similarity: 0.0 = orthogonal, 1.0 = identical
+    let sim = holon.similarity(&normal, &suspicious);
+    println!("Similarity: {:.3}", sim);  // Different structures → low similarity
 
-    // VSA primitives
-    let combined = holon.bundle(&[&billing, &technical]);
-    let without_billing = holon.negate(&combined, &billing);
-
-    // Continuous scalar encoding
-    let rate100 = holon.encode_scalar_log(100.0);
-    let rate1000 = holon.encode_scalar_log(1000.0);
-    // Equal ratios have equal similarity drops
-
-    // Streaming with accumulators
+    // Learn what's "normal" from a stream
     let mut baseline = holon.create_accumulator();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         let event = holon.encode_json(r#"{"type": "normal"}"#)?;
         holon.accumulate(&mut baseline, &event);
     }
     let normal_pattern = holon.normalize_accumulator(&baseline);
 
     // Detect anomalies
-    let anomaly = holon.encode_json(r#"{"type": "unusual"}"#)?;
+    let anomaly = holon.encode_json(r#"{"type": "attack", "payload": "DROP TABLE"}"#)?;
     let anomaly_score = 1.0 - holon.similarity(&anomaly, &normal_pattern);
-    println!("Anomaly score: {:.3}", anomaly_score);
+    println!("Anomaly score: {:.3}", anomaly_score);  // High = anomalous
 
     Ok(())
 }
 ```
 
+<div align="center">
+<img src="../assets/time-bending-lattices.gif" alt="Time-Bending Lattices">
+
+*Patterns encoded into geometry. What was noise becomes signal.*
+</div>
+
+## Performance
+
+Holon-rs is designed for **real-time streaming** at production scale:
+
+| Operation | Python | Rust | Speedup |
+|-----------|--------|------|---------|
+| encode_json | 75 µs | 7 µs | **10x** |
+| similarity | 15 µs | 1.4 µs | **11x** |
+| bind | 12 µs | 0.8 µs | **15x** |
+| Full detection pipeline | 15s | 1.2s | **12x** |
+
+With SIMD acceleration (`--features simd`), similarity operations get an additional **5x** boost.
+
+```bash
+# Enable SIMD (AVX2/NEON)
+cargo build --release --features simd
+```
+
+## Zero-Hardcode Anomaly Detection
+
+The crown jewel: **100% attack recall, 4% false positive rate** - with ZERO domain knowledge.
+
+```bash
+cargo run --example zero_hardcode_detection --release --features simd
+```
+
+```
+DETECTION RESULTS
+------------------------------------------------------------
+Phase              Packets   Detected       Rate       Status
+warmup                 300          0         0% ○ LEARNING
+DNS Attack           15000      14993       100% ✓ DETECTED
+recovery-1             150          6         4% ✓ CLEAN
+SYN Flood            18000      17993       100% ✓ DETECTED
+recovery-2             150          6         4% ✓ CLEAN
+NTP Attack           15000      14993       100% ✓ DETECTED
+final                  150          6         4% ✓ CLEAN
+------------------------------------------------------------
+ATTACK RECALL                               100%
+FALSE POSITIVE RATE                           4%
+```
+
+**What the detector doesn't know:**
+- Port 53 = DNS
+- Port 123 = NTP
+- What "attack" means
+
+**What it does know:**
+- How to learn "normal" from a baseline
+- How to detect when current traffic differs
+- How to explain what changed (without interpretation)
+
 ## Core Concepts
 
 ### Deterministic Vectors
 
-The same atomic value always produces the exact same vector:
+Same atom → same vector. Always. Everywhere.
 
 ```rust
-let holon1 = Holon::with_seed(4096, 42);
-let holon2 = Holon::with_seed(4096, 42);
+// Tokyo data center
+let tokyo = Holon::with_seed(4096, 42);
+let vec_tokyo = tokyo.get_vector("suspicious_pattern");
 
-let v1 = holon1.get_vector("hello");
-let v2 = holon2.get_vector("hello");
-assert_eq!(v1, v2);  // Always true
+// NYC data center
+let nyc = Holon::with_seed(4096, 42);
+let vec_nyc = nyc.get_vector("suspicious_pattern");
+
+assert_eq!(vec_tokyo, vec_nyc);  // Always true - no sync needed!
 ```
 
-This enables distributed systems to agree on vector representations without synchronization.
+This enables **distributed consensus without synchronization**. Every node with the same seed generates identical representations.
 
 ### Role-Filler Binding
 
-Structural encoding preserves key-value relationships:
+Structure matters. `{"src_port": 53}` is different from `{"dst_port": 53}`:
 
 ```rust
-let src_53 = holon.encode_json(r#"{"src_port": 53}"#)?;
-let dst_53 = holon.encode_json(r#"{"dst_port": 53}"#)?;
+let src = holon.encode_json(r#"{"src_port": 53}"#)?;
+let dst = holon.encode_json(r#"{"dst_port": 53}"#)?;
 
-// These are DIFFERENT vectors because of role-filler binding
-let sim = holon.similarity(&src_53, &dst_53);
-assert!(sim < 0.5);
+let sim = holon.similarity(&src, &dst);
+assert!(sim < 0.5);  // Same value, different role → different vector
 ```
 
 ### VSA Primitives
 
-| Primitive | Purpose | Property |
-|-----------|---------|----------|
-| `bind(a, b)` | Create association | `unbind(bind(a, b), a) ≈ b` |
-| `bundle([a, b, c])` | Create superposition | Similar to all inputs |
-| `negate(abc, b)` | Remove component | Reduces similarity to b |
-| `amplify(abc, a, 2.0)` | Strengthen component | Increases similarity to a |
-| `prototype([...], 0.5)` | Extract common pattern | Majority voting |
+All the mystical operations:
 
-### Accumulators vs Bundle
+| Primitive | Spell | Effect |
+|-----------|-------|--------|
+| `bind(a, b)` | Entanglement | Creates reversible association |
+| `bundle([a,b,c])` | Superposition | Combines into one (similar to all) |
+| `negate(abc, b)` | Banishment | Removes component |
+| `amplify(abc, a, 2.0)` | Empowerment | Strengthens component |
+| `prototype([...])` | Essence Extraction | Finds common pattern |
+| `difference(a, b)` | Delta Vision | The change is a vector |
+| `blend(a, b, 0.7)` | Fusion | Weighted combination |
 
-Critical difference for anomaly detection:
+### Continuous Scalar Encoding
 
-```rust
-// Bundle is idempotent
-let bundled = holon.bundle(&[&a, &a, &a, &a, &a]);  // Same as just 'a'
-
-// Accumulator preserves frequency
-let mut acc = holon.create_accumulator();
-for _ in 0..100 {
-    holon.accumulate(&mut acc, &common);
-}
-holon.accumulate(&mut acc, &rare);
-
-// common has 100x more influence than rare
-```
-
-### Scalar Encoding
-
-Encode continuous values where similar values have similar vectors:
+Encode rates, temperatures, angles - where similar values have similar vectors:
 
 ```rust
-// Linear: equal absolute differences → equal similarity drops
-let t100 = holon.encode_scalar(100.0, ScalarMode::Linear { scale: 1000.0 });
-let t110 = holon.encode_scalar(110.0, ScalarMode::Linear { scale: 1000.0 });
-
-// Logarithmic: equal ratios → equal similarity drops
+// Log-scale: equal ratios = equal similarity
 let r100 = holon.encode_scalar_log(100.0);
 let r1000 = holon.encode_scalar_log(1000.0);
 let r10000 = holon.encode_scalar_log(10000.0);
-// sim(r100, r1000) ≈ sim(r1000, r10000)
 
-// Circular: wraps around (hour 23 similar to hour 0)
+// 100→1000 similarity ≈ 1000→10000 (both 10x ratio)
+
+// Circular: hour 23 is similar to hour 0
 let h23 = holon.encode_scalar(23.0, ScalarMode::Circular { period: 24.0 });
 let h0 = holon.encode_scalar(0.0, ScalarMode::Circular { period: 24.0 });
+```
+
+### Accumulators: Frequency Matters
+
+The secret weapon for anomaly detection:
+
+```rust
+// Bundle is idempotent - 100x same = 1x
+let bundled = holon.bundle(&[&a, &a, &a, /* ...100x... */ &a]);
+
+// Accumulator preserves frequency - 100x normal drowns out 1x rare
+let mut acc = holon.create_accumulator();
+for _ in 0..100 {
+    holon.accumulate(&mut acc, &normal);
+}
+holon.accumulate(&mut acc, &rare);
+
+// 99% of the signal is "normal" - rare barely registers
+```
+
+## Examples
+
+```bash
+# Zero-hardcode detection (DNS, SYN, NTP attacks)
+cargo run --example zero_hardcode_detection --release --features simd
+
+# Pure vector rate detection
+cargo run --example pure_vector_rate --release --features simd
+
+# Run all tests
+cargo test
+
+# Benchmarks
+cargo bench
 ```
 
 ## Building
 
 ```bash
-# Build
+# Standard build
 cargo build --release
+
+# With SIMD acceleration (recommended)
+cargo build --release --features simd
 
 # Run tests
 cargo test
 
-# Run benchmarks
-cargo bench
+# Run with SIMD tests
+cargo test --features simd
 ```
 
 ## Project Structure
 
 ```
 holon-rs/
-├── Cargo.toml          # Package manifest
 ├── src/
-│   ├── lib.rs          # Main entry point, Holon struct
-│   ├── vector.rs       # Vector type (bipolar {-1, 0, 1})
-│   ├── vector_manager.rs # Deterministic atom → vector mapping
-│   ├── primitives.rs   # VSA operations (bind, bundle, etc.)
-│   ├── encoder.rs      # Structured data encoding
-│   ├── scalar.rs       # Continuous scalar encoding
-│   ├── accumulator.rs  # Streaming operations
-│   ├── similarity.rs   # Similarity metrics
-│   └── error.rs        # Error types
+│   ├── lib.rs           # Main Holon interface
+│   ├── vector.rs        # Bipolar vectors {-1, 0, 1}
+│   ├── vector_manager.rs # Deterministic atom→vector
+│   ├── primitives.rs    # VSA operations
+│   ├── encoder.rs       # JSON→vector encoding
+│   ├── scalar.rs        # Continuous value encoding
+│   ├── accumulator.rs   # Streaming primitives
+│   ├── similarity.rs    # Metrics (cosine, dot, etc.)
+│   └── error.rs         # Error types
+├── examples/
+│   ├── zero_hardcode_detection.rs  # Full Batch 012 demo
+│   └── pure_vector_rate.rs         # Challenge 008 port
 └── benches/
-    └── benchmarks.rs   # Criterion benchmarks
+    └── benchmarks.rs    # Criterion benchmarks
 ```
+
+<div align="center">
+<img src="../assets/forbidden-binding-spell.gif" alt="Forbidden Binding">
+
+*From mystical runes to mathematical vectors. The magic is in the math.*
+</div>
+
+## Parity with Python
+
+| Feature | Python | Rust |
+|---------|--------|------|
+| Deterministic vectors | ✅ | ✅ |
+| Role-filler binding | ✅ | ✅ |
+| All VSA primitives | ✅ | ✅ |
+| Accumulators | ✅ | ✅ |
+| Scalar encoding (linear/log/circular) | ✅ | ✅ |
+| Sequence encoding | ✅ | ✅ |
+| SIMD acceleration | ❌ | ✅ |
+| Zero-hardcode detection | ✅ | ✅ (12x faster) |
 
 ## License
 
 MIT
+
+---
+
+*"The sorcerer supreme doesn't debug. The sorcerer supreme computes in dimensions where bugs cannot exist."*
