@@ -6,7 +6,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 
 <div align="center">
-<img src="../assets/superposition-incantation.gif" alt="Superposition Incantation">
+<img src="assets/superposition-incantation.gif" alt="Superposition Incantation">
 
 *The sorcerer computes in high dimensions. Similarity becomes destiny.*
 </div>
@@ -47,7 +47,7 @@ fn main() -> holon::Result<()> {
 ```
 
 <div align="center">
-<img src="../assets/time-bending-lattices.gif" alt="Time-Bending Lattices">
+<img src="assets/time-bending-lattices.gif" alt="Time-Bending Lattices">
 
 *Patterns encoded into geometry. What was noise becomes signal.*
 </div>
@@ -239,7 +239,7 @@ holon-rs/
 ```
 
 <div align="center">
-<img src="../assets/forbidden-binding-spell.gif" alt="Forbidden Binding">
+<img src="assets/forbidden-binding-spell.gif" alt="Forbidden Binding">
 
 *From mystical runes to mathematical vectors. The magic is in the math.*
 </div>
