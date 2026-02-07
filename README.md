@@ -4,6 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
+[![Python](https://img.shields.io/badge/python_version-holon-blue.svg)](https://github.com/watmin/holon)
 
 <div align="center">
 <img src="assets/superposition-incantation.gif" alt="Superposition Incantation">
@@ -256,6 +257,10 @@ holon-rs/
 | Sequence encoding | ✅ | ✅ |
 | SIMD acceleration | ❌ | ✅ |
 | Zero-hardcode detection | ✅ | ✅ (12x faster) |
+
+## See Also
+
+- **[holon](https://github.com/watmin/holon)** — Python implementation with HTTP API, extensive documentation, and 12 challenge batches exploring VSA capabilities. Start here for learning and prototyping.
 
 ## License
 
