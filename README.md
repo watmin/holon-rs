@@ -1,6 +1,6 @@
 # Holon (Rust)
 
-**Programmatic Neural Memory** using Vector Symbolic Architectures
+**VSA for structured data.** JSON becomes geometry — role-filler binding preserves structure, similarity search finds shape, not just content.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
@@ -11,7 +11,7 @@
 *The sorcerer computes in high dimensions. Similarity becomes destiny.*
 </div>
 
-The Rust implementation of Holon - high-performance hyperdimensional computing for anomaly detection, pattern matching, and structural similarity. Same mathematical foundations as Python, but **12x faster**.
+High-performance Vector Symbolic Architecture library in Rust. Encode structured data as vectors, compose with algebraic primitives, learn patterns from streams. Same foundations as Python Holon, but **12x faster**.
 
 ## Quick Start
 
