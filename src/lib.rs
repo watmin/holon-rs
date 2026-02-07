@@ -43,9 +43,9 @@ pub mod vector_manager;
 
 // Re-exports for convenience
 pub use accumulator::Accumulator;
-pub use encoder::Encoder;
+pub use encoder::{Encoder, SequenceMode};
 pub use error::{HolonError, Result};
-pub use primitives::Primitives;
+pub use primitives::{NegateMethod, Primitives};
 pub use scalar::{ScalarEncoder, ScalarMode};
 pub use similarity::{Metric, Similarity};
 pub use vector::Vector;
@@ -144,6 +144,14 @@ impl Holon {
         self.encoder.encode_json(json)
     }
 
+    /// Encode a serde_json Value directly.
+    ///
+    /// Useful when you already have parsed JSON or want to construct
+    /// values programmatically without serializing to string.
+    pub fn encode_value(&self, value: &serde_json::Value) -> Vector {
+        self.encoder.encode_value(value, None)
+    }
+
     /// Get the base vector for an atomic value.
     ///
     /// Same atom always produces the same vector (deterministic).
@@ -180,6 +188,27 @@ impl Holon {
     /// Perfect for rates, frequencies, and other multiplicative quantities.
     pub fn encode_scalar_log(&self, value: f64) -> Vector {
         self.scalar_encoder.encode_log(value)
+    }
+
+    /// Encode a sequence of items.
+    ///
+    /// # Arguments
+    /// * `items` - Slice of string items to encode
+    /// * `mode` - How to encode the sequence (Bundle, Positional, Chained, Ngram)
+    ///
+    /// # Example
+    /// ```rust
+    /// // Order-preserving
+    /// let seq = holon.encode_sequence(&["A", "B", "C"], SequenceMode::Positional);
+    ///
+    /// // Order-independent (bag of items)
+    /// let bag = holon.encode_sequence(&["A", "B", "C"], SequenceMode::Bundle);
+    ///
+    /// // N-gram patterns
+    /// let ngrams = holon.encode_sequence(&["A", "B", "C"], SequenceMode::Ngram { n: 2 });
+    /// ```
+    pub fn encode_sequence(&self, items: &[&str], mode: SequenceMode) -> Vector {
+        self.encoder.encode_sequence(items, mode)
     }
 
     // =========================================================================
@@ -258,6 +287,21 @@ impl Holon {
     /// Circular shift (permutation) of vector dimensions.
     pub fn permute(&self, vec: &Vector, k: i32) -> Vector {
         Primitives::permute(vec, k)
+    }
+
+    /// Cleanup: find the closest vector in a codebook.
+    ///
+    /// Returns the index and similarity of the best match, or None if codebook is empty.
+    pub fn cleanup(&self, noisy: &Vector, codebook: &[Vector]) -> Option<(usize, f64)> {
+        Primitives::cleanup(noisy, codebook)
+    }
+
+    /// Incremental prototype update.
+    ///
+    /// Updates an existing prototype with a new example.
+    /// `count` is the number of examples already in the prototype.
+    pub fn prototype_add(&self, prototype: &Vector, example: &Vector, count: usize) -> Vector {
+        Primitives::prototype_add(prototype, example, count)
     }
 
     // =========================================================================
@@ -405,6 +449,297 @@ mod tests {
             "Expected common > rare, got {} vs {}",
             sim_common,
             sim_rare
+        );
+    }
+
+    #[test]
+    fn test_amplify() {
+        let holon = Holon::new(4096);
+
+        let a = holon.get_vector("A");
+        let b = holon.get_vector("B");
+
+        let ab = holon.bundle(&[&a, &b]);
+        let amplified = holon.amplify(&ab, &a, 2.0);
+
+        // After amplification, A should have higher similarity
+        assert!(holon.similarity(&amplified, &a) > holon.similarity(&ab, &a));
+    }
+
+    #[test]
+    fn test_prototype() {
+        let holon = Holon::new(4096);
+
+        // Create vectors with common patterns
+        let v1 = holon.encode_json(r#"{"type": "billing", "a": 1}"#).unwrap();
+        let v2 = holon.encode_json(r#"{"type": "billing", "b": 2}"#).unwrap();
+        let v3 = holon.encode_json(r#"{"type": "billing", "c": 3}"#).unwrap();
+
+        let proto = holon.prototype(&[&v1, &v2, &v3], 0.5);
+
+        // Prototype should be similar to all inputs
+        assert!(holon.similarity(&proto, &v1) > 0.2);
+        assert!(holon.similarity(&proto, &v2) > 0.2);
+        assert!(holon.similarity(&proto, &v3) > 0.2);
+    }
+
+    #[test]
+    fn test_prototype_add() {
+        let holon = Holon::new(4096);
+
+        let a = holon.get_vector("pattern_a");
+        let b = holon.get_vector("pattern_b");
+        let c = holon.get_vector("pattern_c");
+
+        // Incremental prototype building
+        let proto1 = a.clone();
+        let proto2 = holon.prototype_add(&proto1, &b, 1);
+        let proto3 = holon.prototype_add(&proto2, &c, 2);
+
+        // Final prototype should have some similarity to all inputs
+        assert!(holon.similarity(&proto3, &a) > 0.0);
+        assert!(holon.similarity(&proto3, &b) > 0.0);
+        assert!(holon.similarity(&proto3, &c) > 0.0);
+    }
+
+    #[test]
+    fn test_cleanup() {
+        let holon = Holon::new(4096);
+
+        let a = holon.get_vector("A");
+        let b = holon.get_vector("B");
+        let c = holon.get_vector("C");
+
+        let codebook = vec![a.clone(), b.clone(), c.clone()];
+
+        // Noisy version of A (bundle with some noise)
+        let noise = holon.get_vector("noise");
+        let noisy_a = holon.bundle(&[&a, &a, &a, &noise]);
+
+        let (idx, sim) = holon.cleanup(&noisy_a, &codebook).unwrap();
+
+        assert_eq!(idx, 0, "Should find A as closest match");
+        assert!(sim > 0.5, "Should have high similarity");
+    }
+
+    #[test]
+    fn test_difference() {
+        let holon = Holon::new(4096);
+
+        let before = holon.encode_json(r#"{"status": "pending"}"#).unwrap();
+        let after = holon.encode_json(r#"{"status": "completed"}"#).unwrap();
+
+        let diff = holon.difference(&before, &after);
+
+        // Difference should be non-zero
+        assert!(diff.nnz() > 0);
+    }
+
+    #[test]
+    fn test_blend() {
+        let holon = Holon::new(4096);
+
+        let a = holon.get_vector("state_a");
+        let b = holon.get_vector("state_b");
+
+        let blend_0 = holon.blend(&a, &b, 0.0);
+        let blend_1 = holon.blend(&a, &b, 1.0);
+        let blend_half = holon.blend(&a, &b, 0.5);
+
+        // blend(a, b, 0) should be similar to a
+        assert!(holon.similarity(&blend_0, &a) > 0.9);
+
+        // blend(a, b, 1) should be similar to b
+        assert!(holon.similarity(&blend_1, &b) > 0.9);
+
+        // blend at 0.5 should be somewhat similar to both
+        assert!(holon.similarity(&blend_half, &a) > 0.3);
+        assert!(holon.similarity(&blend_half, &b) > 0.3);
+    }
+
+    #[test]
+    fn test_resonance() {
+        let holon = Holon::new(4096);
+
+        let a = holon.get_vector("A");
+        let b = holon.get_vector("B");
+
+        let ab = holon.bundle(&[&a, &b]);
+        let resonant = holon.resonance(&ab, &a);
+
+        // Resonance with A should increase similarity to A
+        assert!(holon.similarity(&resonant, &a) >= holon.similarity(&ab, &a) - 0.1);
+    }
+
+    #[test]
+    fn test_permute() {
+        let holon = Holon::new(4096);
+
+        let v = holon.get_vector("seq_item");
+
+        let permuted = holon.permute(&v, 10);
+        let restored = holon.permute(&permuted, -10);
+
+        // Permute and inverse permute should restore original
+        assert_eq!(v, restored);
+    }
+
+    #[test]
+    fn test_encode_sequence_positional() {
+        let holon = Holon::new(4096);
+
+        let seq1 = holon.encode_sequence(&["A", "B", "C"], SequenceMode::Positional);
+        let seq2 = holon.encode_sequence(&["C", "B", "A"], SequenceMode::Positional);
+
+        // Different order should produce different vectors
+        let sim = holon.similarity(&seq1, &seq2);
+        assert!(sim < 0.8, "Expected lower similarity for reversed, got {}", sim);
+    }
+
+    #[test]
+    fn test_encode_sequence_bundle() {
+        let holon = Holon::new(4096);
+
+        let seq1 = holon.encode_sequence(&["A", "B", "C"], SequenceMode::Bundle);
+        let seq2 = holon.encode_sequence(&["C", "B", "A"], SequenceMode::Bundle);
+
+        // Same items should produce similar vectors regardless of order
+        let sim = holon.similarity(&seq1, &seq2);
+        assert!(sim > 0.9, "Expected high similarity for same items, got {}", sim);
+    }
+
+    #[test]
+    fn test_encode_sequence_ngram() {
+        let holon = Holon::new(4096);
+
+        let seq1 = holon.encode_sequence(&["A", "B", "C", "D"], SequenceMode::Ngram { n: 2 });
+        let seq2 = holon.encode_sequence(&["A", "B", "X", "Y"], SequenceMode::Ngram { n: 2 });
+
+        // Shared "AB" bigram should give some similarity
+        let sim = holon.similarity(&seq1, &seq2);
+        assert!(sim > 0.1, "Expected some similarity from shared ngram, got {}", sim);
+    }
+
+    #[test]
+    fn test_scalar_log_ratio_preservation() {
+        let holon = Holon::new(4096);
+
+        let v100 = holon.encode_scalar_log(100.0);
+        let v1000 = holon.encode_scalar_log(1000.0);
+        let v10000 = holon.encode_scalar_log(10000.0);
+
+        let sim_100_1000 = holon.similarity(&v100, &v1000);
+        let sim_1000_10000 = holon.similarity(&v1000, &v10000);
+
+        // 10x ratios should have similar similarity drops
+        let diff = (sim_100_1000 - sim_1000_10000).abs();
+        assert!(diff < 0.2, "Expected similar drops, got {} vs {} (diff {})",
+            sim_100_1000, sim_1000_10000, diff);
+    }
+
+    #[test]
+    fn test_encode_value_direct() {
+        use serde_json::json;
+
+        let holon = Holon::new(4096);
+
+        let value = json!({"type": "test", "count": 42});
+        let vec = holon.encode_value(&value);
+
+        assert_eq!(vec.dimensions(), 4096);
+        assert!(vec.nnz() > 0);
+    }
+
+    #[test]
+    fn test_similarity_metrics() {
+        let holon = Holon::new(4096);
+
+        let a = holon.get_vector("A");
+        let b = holon.get_vector("B");
+
+        // Test different metrics
+        let cos = holon.similarity_with_metric(&a, &a, Metric::Cosine);
+        let ham = holon.similarity_with_metric(&a, &a, Metric::Hamming);
+        let euc = holon.similarity_with_metric(&a, &a, Metric::Euclidean);
+
+        // Self-similarity should be maximal
+        assert!((cos - 1.0).abs() < 1e-10);
+        assert!((ham - 1.0).abs() < 1e-10);
+        assert!((euc - 1.0).abs() < 1e-10); // Distance 0 -> similarity 1
+    }
+
+    // =========================================================================
+    // Integration Tests
+    // =========================================================================
+
+    #[test]
+    fn test_anomaly_detection_workflow() {
+        let holon = Holon::new(4096);
+
+        // Build baseline from normal patterns
+        let mut baseline_accum = holon.create_accumulator();
+
+        for i in 0..100 {
+            let normal = holon.encode_json(&format!(
+                r#"{{"type": "request", "endpoint": "/api/users", "status": 200, "id": {}}}"#,
+                i
+            )).unwrap();
+            holon.accumulate(&mut baseline_accum, &normal);
+        }
+
+        let baseline = holon.normalize_accumulator(&baseline_accum);
+
+        // Test normal request
+        let normal_test = holon.encode_json(
+            r#"{"type": "request", "endpoint": "/api/users", "status": 200}"#
+        ).unwrap();
+
+        // Test anomalous request
+        let anomaly_test = holon.encode_json(
+            r#"{"type": "request", "endpoint": "/admin/delete_all", "status": 500}"#
+        ).unwrap();
+
+        let sim_normal = holon.similarity(&normal_test, &baseline);
+        let sim_anomaly = holon.similarity(&anomaly_test, &baseline);
+
+        // Normal should have higher similarity to baseline
+        assert!(
+            sim_normal > sim_anomaly,
+            "Expected normal > anomaly, got {} vs {}",
+            sim_normal,
+            sim_anomaly
+        );
+    }
+
+    #[test]
+    fn test_rate_based_anomaly_detection() {
+        let holon = Holon::new(4096);
+
+        // Build baseline from normal rates
+        let mut rate_accum = holon.create_accumulator();
+
+        for _ in 0..50 {
+            // Normal rate: ~100 pps with some variation
+            let rate = 100.0 + (rand::random::<f64>() - 0.5) * 20.0;
+            let rate_vec = holon.encode_scalar_log(rate);
+            holon.accumulate(&mut rate_accum, &rate_vec);
+        }
+
+        let rate_baseline = holon.normalize_accumulator(&rate_accum);
+
+        // Test normal rate
+        let normal_rate = holon.encode_scalar_log(105.0);
+        // Test anomalous rate (DDoS-like)
+        let anomaly_rate = holon.encode_scalar_log(100000.0);
+
+        let sim_normal = holon.similarity(&normal_rate, &rate_baseline);
+        let sim_anomaly = holon.similarity(&anomaly_rate, &rate_baseline);
+
+        assert!(
+            sim_normal > sim_anomaly,
+            "Expected normal rate > anomaly rate, got {} vs {}",
+            sim_normal,
+            sim_anomaly
         );
     }
 }
