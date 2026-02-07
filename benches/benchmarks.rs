@@ -13,10 +13,10 @@ fn benchmark_vector_generation(c: &mut Criterion) {
 
 fn benchmark_bind(c: &mut Criterion) {
     let holon = Holon::new(4096);
-    let a = holon.get_vector("A");
-    let b = holon.get_vector("B");
+    let vec_a = holon.get_vector("A");
+    let vec_b = holon.get_vector("B");
 
-    c.bench_function("bind", |b| b.iter(|| holon.bind(black_box(&a), black_box(&b))));
+    c.bench_function("bind", |b| b.iter(|| holon.bind(black_box(&vec_a), black_box(&vec_b))));
 }
 
 fn benchmark_bundle(c: &mut Criterion) {
@@ -29,11 +29,11 @@ fn benchmark_bundle(c: &mut Criterion) {
 
 fn benchmark_similarity(c: &mut Criterion) {
     let holon = Holon::new(4096);
-    let a = holon.get_vector("A");
-    let b = holon.get_vector("B");
+    let vec_a = holon.get_vector("A");
+    let vec_b = holon.get_vector("B");
 
     c.bench_function("similarity", |b| {
-        b.iter(|| holon.similarity(black_box(&a), black_box(&b)))
+        b.iter(|| holon.similarity(black_box(&vec_a), black_box(&vec_b)))
     });
 }
 

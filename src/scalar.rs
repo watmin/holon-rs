@@ -22,7 +22,7 @@
 //! - December is similar to January
 
 use crate::vector::Vector;
-use rand::SeedableRng;
+use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use sha2::{Digest, Sha256};
 

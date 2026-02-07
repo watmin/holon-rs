@@ -34,7 +34,7 @@ serde_json = "1.0"
 thiserror = "1.0"
 
 # Optional: SIMD-accelerated similarity (enable with --features simd)
-simsimd = { version = "0.5", optional = true }
+simsimd = { version = "6.5", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"

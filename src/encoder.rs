@@ -17,7 +17,7 @@
 //! - `bind(role["src_port"], value["53"])` is different from
 //! - `bind(role["dst_port"], value["53"])`
 
-use crate::error::{HolonError, Result};
+use crate::error::Result;
 use crate::primitives::Primitives;
 use crate::vector::Vector;
 use crate::vector_manager::VectorManager;
