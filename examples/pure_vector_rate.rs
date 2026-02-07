@@ -9,7 +9,7 @@
 //!
 //! Run: cargo run --example pure_vector_rate
 
-use holon::{Holon, SequenceMode};
+use holon::Holon;
 use std::collections::VecDeque;
 
 // =============================================================================
@@ -60,6 +60,8 @@ impl Packet {
 struct RateCalculator {
     timestamps: VecDeque<f64>,
     window_size: usize,
+    last_rate: f64,
+    smoothing: f64,
 }
 
 impl RateCalculator {
@@ -67,26 +69,49 @@ impl RateCalculator {
         Self {
             timestamps: VecDeque::with_capacity(window_size),
             window_size,
+            last_rate: 100.0, // Initial estimate
+            smoothing: 0.1,   // EMA smoothing factor
         }
     }
 
     fn add(&mut self, timestamp: f64) -> f64 {
+        // Compute instantaneous rate from last timestamp
+        let instant_rate = if let Some(&last_ts) = self.timestamps.back() {
+            let delta = timestamp - last_ts;
+            if delta > 1e-9 {
+                1.0 / delta // packets per second
+            } else {
+                1_000_000.0 // Cap at 1M pps for near-zero delta
+            }
+        } else {
+            100.0 // Default for first packet
+        };
+
+        // Update sliding window
         self.timestamps.push_back(timestamp);
         if self.timestamps.len() > self.window_size {
             self.timestamps.pop_front();
         }
-        self.current_rate()
+
+        // Exponential moving average for smoothing
+        self.last_rate = self.smoothing * instant_rate + (1.0 - self.smoothing) * self.last_rate;
+
+        // Also compute window-based rate for comparison
+        let window_rate = self.window_rate();
+
+        // Use the higher of instant and window rate (to catch bursts)
+        window_rate.max(self.last_rate)
     }
 
-    fn current_rate(&self) -> f64 {
+    fn window_rate(&self) -> f64 {
         if self.timestamps.len() < 2 {
-            return 1.0;
+            return self.last_rate;
         }
         let duration = self.timestamps.back().unwrap() - self.timestamps.front().unwrap();
-        if duration < 0.001 {
-            return 1.0;
+        if duration < 1e-9 {
+            return 1_000_000.0; // Near-instant = very high rate
         }
-        self.timestamps.len() as f64 / duration
+        (self.timestamps.len() - 1) as f64 / duration
     }
 }
 
@@ -148,14 +173,23 @@ impl ZeroHardcodeDetector {
         let rate_sim = self.holon.similarity(&rate_vec, &rate_baseline);
 
         // Zero hardcoded thresholds - use statistical approach
-        // Anomaly if BOTH pattern AND rate are unusual
-        let is_anomaly = pattern_sim < 0.3 && rate_sim < 0.3;
+        // Anomaly if:
+        // - Pattern is unusual (low similarity to baseline patterns)
+        // - OR rate is unusual (negative similarity = opposite of normal, or low positive)
+        //
+        // Note: rate_sim < 0.5 catches both low positive AND negative values
+        // A negative rate_sim means the rate vector is anti-correlated with baseline
+        let pattern_anomaly = pattern_sim < 0.3;
+        let rate_anomaly = rate_sim < 0.5;
+        let is_anomaly = pattern_anomaly && rate_anomaly;
 
-        // Continue learning with decay
-        self.pattern_accum.decay(self.decay);
-        self.rate_accum.decay(self.decay);
-        self.holon.accumulate(&mut self.pattern_accum, &pattern_vec);
-        self.holon.accumulate(&mut self.rate_accum, &rate_vec);
+        // Only continue learning if NOT anomalous (don't let attacks poison the baseline)
+        if !is_anomaly {
+            self.pattern_accum.decay(self.decay);
+            self.rate_accum.decay(self.decay);
+            self.holon.accumulate(&mut self.pattern_accum, &pattern_vec);
+            self.holon.accumulate(&mut self.rate_accum, &rate_vec);
+        }
 
         Some((pattern_sim, rate_sim, is_anomaly))
     }

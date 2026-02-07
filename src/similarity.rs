@@ -50,9 +50,18 @@ impl Similarity {
     #[cfg(feature = "simd")]
     pub fn cosine(a: &Vector, b: &Vector) -> f64 {
         use simsimd::SpatialSimilarity;
-        // simsimd returns cosine distance, convert to similarity
-        let dist = i8::cos(a.data(), b.data()).unwrap_or(0.0);
-        1.0 - dist
+        // Use SIMD dot products to compute cosine similarity
+        // cosine = dot(a,b) / sqrt(dot(a,a) * dot(b,b))
+        let dot_ab = i8::dot(a.data(), b.data()).unwrap_or(0.0);
+        let dot_aa = i8::dot(a.data(), a.data()).unwrap_or(0.0);
+        let dot_bb = i8::dot(b.data(), b.data()).unwrap_or(0.0);
+
+        let norm_product = (dot_aa * dot_bb).sqrt();
+        if norm_product < 1e-10 {
+            return 0.0;
+        }
+
+        dot_ab / norm_product
     }
 
     #[cfg(not(feature = "simd"))]
@@ -80,6 +89,7 @@ impl Similarity {
         Self::dot_raw(a, b)
     }
 
+    #[allow(dead_code)]
     fn dot_raw(a: &Vector, b: &Vector) -> f64 {
         assert_eq!(
             a.dimensions(),
