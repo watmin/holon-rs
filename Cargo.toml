@@ -1,0 +1,40 @@
+[package]
+name = "holon"
+version = "0.1.0"
+edition = "2021"
+authors = ["Holon Contributors"]
+description = "Programmatic Neural Memory using Vector Symbolic Architectures"
+license = "MIT"
+repository = "https://github.com/holon/holon-rs"
+keywords = ["vsa", "hdc", "hyperdimensional", "vector", "similarity"]
+categories = ["science", "data-structures", "encoding"]
+
+[lib]
+name = "holon"
+path = "src/lib.rs"
+
+[dependencies]
+# Random number generation (deterministic)
+rand = "0.8"
+rand_chacha = "0.3"
+
+# Hashing for deterministic vector generation
+sha2 = "0.10"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "benchmarks"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
