@@ -21,7 +21,7 @@ use crate::error::Result;
 use crate::primitives::Primitives;
 use crate::vector::Vector;
 use crate::vector_manager::VectorManager;
-use crate::walkable::{ScalarValue, WalkType, Walkable, WalkableValue};
+use crate::walkable::{ScalarRef, ScalarValue, WalkType, Walkable, WalkableRef, WalkableValue};
 use serde_json::Value;
 
 /// Encoder for converting structured data to vectors.
@@ -176,7 +176,20 @@ impl Encoder {
         self.encode_atom(&Self::make_path(prefix, &atom))
     }
 
+    /// Encode a scalar reference (zero-allocation path).
+    #[inline]
+    fn encode_scalar_ref(&self, scalar: ScalarRef<'_>, prefix: Option<&str>) -> Vector {
+        let atom = scalar.to_atom();
+        self.encode_atom(&Self::make_path(prefix, &atom))
+    }
+
     fn encode_walkable_map<W: Walkable>(&self, walkable: &W, prefix: Option<&str>) -> Vector {
+        // Use fast visitor path if available
+        if walkable.has_fast_visitor() {
+            return self.encode_walkable_map_fast(walkable, prefix);
+        }
+
+        // Fallback: use walk_map_items (allocates Vec)
         let items = walkable.walk_map_items();
 
         if items.is_empty() {
@@ -197,6 +210,41 @@ impl Encoder {
             // Role-filler binding
             let bound = Primitives::bind(&role_vec, &filler_vec);
             vectors.push(bound);
+        }
+
+        let refs: Vec<&Vector> = vectors.iter().collect();
+        Primitives::bundle(&refs)
+    }
+
+    /// Fast path using visitor - avoids Vec<WalkableValue> allocation for flat structs.
+    fn encode_walkable_map_fast<W: Walkable>(&self, walkable: &W, prefix: Option<&str>) -> Vector {
+        let mut vectors: Vec<Vector> = Vec::new();
+        let mut has_items = false;
+
+        walkable.walk_map_visitor(&mut |key, value_ref| {
+            has_items = true;
+            let key_path = Self::make_path(prefix, key);
+
+            // Role vector (the key)
+            let role_vec = self.encode_atom(&key_path);
+
+            // Filler vector (the value) - inline encoding based on ref type
+            let filler_vec = match value_ref {
+                WalkableRef::Scalar(scalar_ref) => {
+                    self.encode_scalar_ref(scalar_ref, Some(&key_path))
+                }
+                WalkableRef::Nested(nested_value) => {
+                    self.encode_walkable_value_recursive(&nested_value, Some(&key_path))
+                }
+            };
+
+            // Role-filler binding
+            let bound = Primitives::bind(&role_vec, &filler_vec);
+            vectors.push(bound);
+        });
+
+        if !has_items {
+            return self.encode_atom(&Self::make_path(prefix, "{}"));
         }
 
         let refs: Vec<&Vector> = vectors.iter().collect();

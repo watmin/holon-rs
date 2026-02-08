@@ -51,7 +51,7 @@ pub use scalar::{ScalarEncoder, ScalarMode};
 pub use similarity::{Metric, Similarity};
 pub use vector::Vector;
 pub use vector_manager::VectorManager;
-pub use walkable::{ScalarValue, WalkType, Walkable, WalkableValue};
+pub use walkable::{ScalarRef, ScalarValue, WalkType, Walkable, WalkableRef, WalkableValue};
 
 /// The main Holon client - primary interface for all operations.
 ///

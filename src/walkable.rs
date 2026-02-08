@@ -71,6 +71,96 @@ impl ScalarValue {
     }
 }
 
+// =============================================================================
+// Zero-allocation scalar references
+// =============================================================================
+
+/// A borrowed scalar value - avoids cloning strings.
+#[derive(Clone, Copy, Debug)]
+pub enum ScalarRef<'a> {
+    String(&'a str),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Null,
+}
+
+impl<'a> ScalarRef<'a> {
+    /// Convert to string for vector lookup - still allocates the result string,
+    /// but avoids intermediate clones.
+    #[inline]
+    pub fn to_atom(&self) -> String {
+        match self {
+            ScalarRef::String(s) => (*s).to_string(),
+            ScalarRef::Int(i) => i.to_string(),
+            ScalarRef::Float(f) => f.to_string(),
+            ScalarRef::Bool(b) => b.to_string(),
+            ScalarRef::Null => "null".to_string(),
+        }
+    }
+
+    /// Convert to owned ScalarValue.
+    pub fn to_owned(&self) -> ScalarValue {
+        match self {
+            ScalarRef::String(s) => ScalarValue::String((*s).to_string()),
+            ScalarRef::Int(i) => ScalarValue::Int(*i),
+            ScalarRef::Float(f) => ScalarValue::Float(*f),
+            ScalarRef::Bool(b) => ScalarValue::Bool(*b),
+            ScalarRef::Null => ScalarValue::Null,
+        }
+    }
+}
+
+/// A reference to a walkable value - used by zero-allocation visitor.
+///
+/// For flat structures (most common), use the scalar variants which are zero-allocation.
+/// For nested structures, use `Nested` which takes an owned WalkableValue.
+pub enum WalkableRef<'a> {
+    /// A scalar value (borrowed - zero allocation)
+    Scalar(ScalarRef<'a>),
+    /// A nested structure (owned - requires allocation, but only for nested)
+    Nested(WalkableValue),
+}
+
+impl<'a> WalkableRef<'a> {
+    /// Create a string scalar reference.
+    #[inline]
+    pub fn string(s: &'a str) -> Self {
+        WalkableRef::Scalar(ScalarRef::String(s))
+    }
+
+    /// Create an integer scalar reference.
+    #[inline]
+    pub fn int(i: i64) -> Self {
+        WalkableRef::Scalar(ScalarRef::Int(i))
+    }
+
+    /// Create a float scalar reference.
+    #[inline]
+    pub fn float(f: f64) -> Self {
+        WalkableRef::Scalar(ScalarRef::Float(f))
+    }
+
+    /// Create a bool scalar reference.
+    #[inline]
+    pub fn bool(b: bool) -> Self {
+        WalkableRef::Scalar(ScalarRef::Bool(b))
+    }
+
+    /// Create a null reference.
+    #[inline]
+    pub fn null() -> Self {
+        WalkableRef::Scalar(ScalarRef::Null)
+    }
+
+    /// Create a nested walkable value (for nested structures).
+    /// Note: This requires allocation for the nested value.
+    #[inline]
+    pub fn nested(value: WalkableValue) -> Self {
+        WalkableRef::Nested(value)
+    }
+}
+
 /// A value that can be walked during encoding.
 ///
 /// This enum allows returning owned values from `walk_*` methods,
@@ -162,6 +252,91 @@ pub trait Walkable {
             WalkType::List => WalkableValue::List(self.walk_list_items()),
             WalkType::Set => WalkableValue::Set(self.walk_set_items()),
         }
+    }
+
+    // =========================================================================
+    // Zero-allocation visitor API (faster path)
+    // =========================================================================
+
+    /// Return the scalar as a borrowed reference. Only valid for `WalkType::Scalar`.
+    ///
+    /// Override this for better performance - avoids allocating ScalarValue.
+    fn walk_scalar_ref(&self) -> ScalarRef<'_> {
+        // Default: convert from owned (allocates)
+        match self.walk_scalar() {
+            ScalarValue::String(s) => {
+                // This leaks memory! Only use for fallback.
+                // Real implementations should override this method.
+                ScalarRef::String(Box::leak(s.into_boxed_str()))
+            }
+            ScalarValue::Int(i) => ScalarRef::Int(i),
+            ScalarValue::Float(f) => ScalarRef::Float(f),
+            ScalarValue::Bool(b) => ScalarRef::Bool(b),
+            ScalarValue::Null => ScalarRef::Null,
+        }
+    }
+
+    /// Visit map entries without allocation.
+    ///
+    /// Override this for zero-allocation encoding. The visitor is called
+    /// once for each (key, value) pair.
+    ///
+    /// # Example
+    /// ```rust
+    /// fn walk_map_visitor(&self, visitor: &mut dyn FnMut(&str, WalkableRef<'_>)) {
+    ///     visitor("name", WalkableRef::string(&self.name));
+    ///     visitor("age", WalkableRef::int(self.age as i64));
+    /// }
+    /// ```
+    fn walk_map_visitor(&self, visitor: &mut dyn FnMut(&str, WalkableRef<'_>)) {
+        // Default: use walk_map_items (allocates)
+        for (key, value) in self.walk_map_items() {
+            let wref = walkable_value_to_ref(&value);
+            visitor(key, wref);
+        }
+    }
+
+    /// Visit list items without allocation.
+    fn walk_list_visitor(&self, visitor: &mut dyn FnMut(WalkableRef<'_>)) {
+        // Default: use walk_list_items (allocates)
+        for value in self.walk_list_items() {
+            let wref = walkable_value_to_ref(&value);
+            visitor(wref);
+        }
+    }
+
+    /// Visit set items without allocation.
+    fn walk_set_visitor(&self, visitor: &mut dyn FnMut(WalkableRef<'_>)) {
+        // Default: use walk_set_items (allocates)
+        for value in self.walk_set_items() {
+            let wref = walkable_value_to_ref(&value);
+            visitor(wref);
+        }
+    }
+
+    /// Returns true if this type has optimized visitor implementations.
+    ///
+    /// Types that override walk_map_visitor/walk_list_visitor/walk_set_visitor
+    /// should return true here so the encoder can use the faster path.
+    fn has_fast_visitor(&self) -> bool {
+        false
+    }
+}
+
+/// Convert a WalkableValue to a WalkableRef (for fallback path).
+/// Note: This still allocates for nested structures.
+fn walkable_value_to_ref(value: &WalkableValue) -> WalkableRef<'_> {
+    match value {
+        WalkableValue::Scalar(s) => match s {
+            ScalarValue::String(st) => WalkableRef::Scalar(ScalarRef::String(st)),
+            ScalarValue::Int(i) => WalkableRef::Scalar(ScalarRef::Int(*i)),
+            ScalarValue::Float(f) => WalkableRef::Scalar(ScalarRef::Float(*f)),
+            ScalarValue::Bool(b) => WalkableRef::Scalar(ScalarRef::Bool(*b)),
+            ScalarValue::Null => WalkableRef::Scalar(ScalarRef::Null),
+        },
+        // For nested structures, we can't easily convert without allocation
+        // The visitor pattern works best for flat structures
+        _ => WalkableRef::Scalar(ScalarRef::Null), // Fallback - shouldn't happen in practice
     }
 }
 

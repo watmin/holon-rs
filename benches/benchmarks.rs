@@ -1,10 +1,10 @@
 //! Benchmarks for Holon operations.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use holon::{Holon, ScalarMode, ScalarValue, WalkType, Walkable, WalkableValue};
+use holon::{Holon, ScalarMode, ScalarValue, WalkType, Walkable, WalkableRef, WalkableValue};
 
 // =============================================================================
-// Walkable Packet for benchmarking
+// Walkable Packet for benchmarking (with fast visitor)
 // =============================================================================
 
 #[derive(Clone)]
@@ -17,6 +17,52 @@ struct BenchPacket {
 }
 
 impl Walkable for BenchPacket {
+    fn walk_type(&self) -> WalkType {
+        WalkType::Map
+    }
+
+    // Slow path (for fallback)
+    fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
+        vec![
+            (
+                "protocol",
+                WalkableValue::Scalar(ScalarValue::String(self.protocol.clone())),
+            ),
+            ("src_port", (self.src_port as i64).to_walkable_value()),
+            ("dst_port", (self.dst_port as i64).to_walkable_value()),
+            (
+                "flags",
+                WalkableValue::Scalar(ScalarValue::String(self.flags.clone())),
+            ),
+            ("payload_size", (self.payload_size as i64).to_walkable_value()),
+        ]
+    }
+
+    // Fast path - zero allocation!
+    fn walk_map_visitor(&self, visitor: &mut dyn FnMut(&str, WalkableRef<'_>)) {
+        visitor("protocol", WalkableRef::string(&self.protocol));
+        visitor("src_port", WalkableRef::int(self.src_port as i64));
+        visitor("dst_port", WalkableRef::int(self.dst_port as i64));
+        visitor("flags", WalkableRef::string(&self.flags));
+        visitor("payload_size", WalkableRef::int(self.payload_size as i64));
+    }
+
+    fn has_fast_visitor(&self) -> bool {
+        true
+    }
+}
+
+// Slow packet that doesn't implement fast visitor (for comparison)
+#[derive(Clone)]
+struct SlowPacket {
+    protocol: String,
+    src_port: u16,
+    dst_port: u16,
+    flags: String,
+    payload_size: u32,
+}
+
+impl Walkable for SlowPacket {
     fn walk_type(&self) -> WalkType {
         WalkType::Map
     }
@@ -130,8 +176,16 @@ fn benchmark_encode_walkable(c: &mut Criterion) {
 fn benchmark_walkable_vs_json(c: &mut Criterion) {
     let holon = Holon::new(4096);
 
-    // Same data structure, two encoding paths
-    let packet = BenchPacket {
+    // Same data structure, three encoding paths
+    let fast_packet = BenchPacket {
+        protocol: "TCP".to_string(),
+        src_port: 443,
+        dst_port: 8080,
+        flags: "PA".to_string(),
+        payload_size: 1200,
+    };
+
+    let slow_packet = SlowPacket {
         protocol: "TCP".to_string(),
         src_port: 443,
         dst_port: 8080,
@@ -147,8 +201,12 @@ fn benchmark_walkable_vs_json(c: &mut Criterion) {
         b.iter(|| holon.encode_json(black_box(json)))
     });
 
-    group.bench_function("walkable_path", |b| {
-        b.iter(|| holon.encode_walkable(black_box(&packet)))
+    group.bench_function("walkable_slow", |b| {
+        b.iter(|| holon.encode_walkable(black_box(&slow_packet)))
+    });
+
+    group.bench_function("walkable_fast", |b| {
+        b.iter(|| holon.encode_walkable(black_box(&fast_packet)))
     });
 
     group.finish();
