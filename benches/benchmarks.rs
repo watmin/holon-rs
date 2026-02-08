@@ -1,7 +1,42 @@
 //! Benchmarks for Holon operations.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use holon::{Holon, ScalarMode};
+use holon::{Holon, ScalarMode, ScalarValue, WalkType, Walkable, WalkableValue};
+
+// =============================================================================
+// Walkable Packet for benchmarking
+// =============================================================================
+
+#[derive(Clone)]
+struct BenchPacket {
+    protocol: String,
+    src_port: u16,
+    dst_port: u16,
+    flags: String,
+    payload_size: u32,
+}
+
+impl Walkable for BenchPacket {
+    fn walk_type(&self) -> WalkType {
+        WalkType::Map
+    }
+
+    fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
+        vec![
+            (
+                "protocol",
+                WalkableValue::Scalar(ScalarValue::String(self.protocol.clone())),
+            ),
+            ("src_port", (self.src_port as i64).to_walkable_value()),
+            ("dst_port", (self.dst_port as i64).to_walkable_value()),
+            (
+                "flags",
+                WalkableValue::Scalar(ScalarValue::String(self.flags.clone())),
+            ),
+            ("payload_size", (self.payload_size as i64).to_walkable_value()),
+        ]
+    }
+}
 
 fn benchmark_vector_generation(c: &mut Criterion) {
     let holon = Holon::new(4096);
@@ -73,6 +108,75 @@ fn benchmark_accumulator(c: &mut Criterion) {
     });
 }
 
+// =============================================================================
+// Walkable vs JSON Encoding
+// =============================================================================
+
+fn benchmark_encode_walkable(c: &mut Criterion) {
+    let holon = Holon::new(4096);
+    let packet = BenchPacket {
+        protocol: "TCP".to_string(),
+        src_port: 443,
+        dst_port: 8080,
+        flags: "PA".to_string(),
+        payload_size: 1200,
+    };
+
+    c.bench_function("encode_walkable", |b| {
+        b.iter(|| holon.encode_walkable(black_box(&packet)))
+    });
+}
+
+fn benchmark_walkable_vs_json(c: &mut Criterion) {
+    let holon = Holon::new(4096);
+
+    // Same data structure, two encoding paths
+    let packet = BenchPacket {
+        protocol: "TCP".to_string(),
+        src_port: 443,
+        dst_port: 8080,
+        flags: "PA".to_string(),
+        payload_size: 1200,
+    };
+
+    let json = r#"{"protocol":"TCP","src_port":443,"dst_port":8080,"flags":"PA","payload_size":1200}"#;
+
+    let mut group = c.benchmark_group("encoding_comparison");
+
+    group.bench_function("json_path", |b| {
+        b.iter(|| holon.encode_json(black_box(json)))
+    });
+
+    group.bench_function("walkable_path", |b| {
+        b.iter(|| holon.encode_walkable(black_box(&packet)))
+    });
+
+    group.finish();
+}
+
+fn benchmark_json_string_building(c: &mut Criterion) {
+    let packet = BenchPacket {
+        protocol: "TCP".to_string(),
+        src_port: 443,
+        dst_port: 8080,
+        flags: "PA".to_string(),
+        payload_size: 1200,
+    };
+
+    c.bench_function("json_string_building", |b| {
+        b.iter(|| {
+            format!(
+                r#"{{"protocol":"{}","src_port":{},"dst_port":{},"flags":"{}","payload_size":{}}}"#,
+                black_box(&packet.protocol),
+                black_box(packet.src_port),
+                black_box(packet.dst_port),
+                black_box(&packet.flags),
+                black_box(packet.payload_size)
+            )
+        })
+    });
+}
+
 criterion_group!(
     benches,
     benchmark_vector_generation,
@@ -82,6 +186,9 @@ criterion_group!(
     benchmark_encode_json,
     benchmark_scalar_encoding,
     benchmark_accumulator,
+    benchmark_encode_walkable,
+    benchmark_walkable_vs_json,
+    benchmark_json_string_building,
 );
 
 criterion_main!(benches);

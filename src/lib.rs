@@ -40,6 +40,7 @@ pub mod scalar;
 pub mod similarity;
 pub mod vector;
 pub mod vector_manager;
+pub mod walkable;
 
 // Re-exports for convenience
 pub use accumulator::Accumulator;
@@ -50,6 +51,7 @@ pub use scalar::{ScalarEncoder, ScalarMode};
 pub use similarity::{Metric, Similarity};
 pub use vector::Vector;
 pub use vector_manager::VectorManager;
+pub use walkable::{ScalarValue, WalkType, Walkable, WalkableValue};
 
 /// The main Holon client - primary interface for all operations.
 ///
@@ -209,6 +211,48 @@ impl Holon {
     /// ```
     pub fn encode_sequence(&self, items: &[&str], mode: SequenceMode) -> Vector {
         self.encoder.encode_sequence(items, mode)
+    }
+
+    /// Encode any type implementing the Walkable trait.
+    ///
+    /// This is the zero-serialization path: no JSON conversion needed.
+    /// Your structs implement the Walkable trait and get encoded directly.
+    ///
+    /// # Example
+    /// ```rust
+    /// use holon::{Holon, Walkable, WalkType, WalkableValue};
+    ///
+    /// struct Packet {
+    ///     protocol: String,
+    ///     src_port: u16,
+    ///     dst_port: u16,
+    /// }
+    ///
+    /// impl Walkable for Packet {
+    ///     fn walk_type(&self) -> WalkType { WalkType::Map }
+    ///     fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
+    ///         vec![
+    ///             ("protocol", self.protocol.to_walkable_value()),
+    ///             ("src_port", (self.src_port as i64).to_walkable_value()),
+    ///             ("dst_port", (self.dst_port as i64).to_walkable_value()),
+    ///         ]
+    ///     }
+    /// }
+    ///
+    /// let holon = Holon::new(4096);
+    /// let packet = Packet { protocol: "TCP".into(), src_port: 443, dst_port: 8080 };
+    /// let vec = holon.encode_walkable(&packet);
+    /// ```
+    pub fn encode_walkable<W: Walkable>(&self, walkable: &W) -> Vector {
+        self.encoder.encode_walkable(walkable)
+    }
+
+    /// Encode a WalkableValue directly.
+    ///
+    /// Useful when you have dynamically constructed WalkableValues
+    /// rather than typed structs.
+    pub fn encode_walkable_value(&self, value: &WalkableValue) -> Vector {
+        self.encoder.encode_walkable_value(value)
     }
 
     // =========================================================================
@@ -637,6 +681,158 @@ mod tests {
             sim_100_1000, sim_1000_10000, diff);
     }
 
+    // =========================================================================
+    // Walkable Tests
+    // =========================================================================
+
+    #[test]
+    fn test_encode_walkable_custom_struct() {
+        use crate::walkable::{WalkType, Walkable, WalkableValue};
+
+        struct Packet {
+            protocol: String,
+            src_port: u16,
+            dst_port: u16,
+        }
+
+        impl Walkable for Packet {
+            fn walk_type(&self) -> WalkType {
+                WalkType::Map
+            }
+
+            fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
+                vec![
+                    ("protocol", self.protocol.to_walkable_value()),
+                    ("src_port", (self.src_port as i64).to_walkable_value()),
+                    ("dst_port", (self.dst_port as i64).to_walkable_value()),
+                ]
+            }
+        }
+
+        let holon = Holon::new(4096);
+
+        let tcp = Packet {
+            protocol: "TCP".into(),
+            src_port: 443,
+            dst_port: 8080,
+        };
+
+        let udp = Packet {
+            protocol: "UDP".into(),
+            src_port: 53,
+            dst_port: 1234,
+        };
+
+        let vec_tcp = holon.encode_walkable(&tcp);
+        let vec_udp = holon.encode_walkable(&udp);
+
+        // Should produce valid vectors
+        assert_eq!(vec_tcp.dimensions(), 4096);
+        assert!(vec_tcp.nnz() > 0);
+        assert!(vec_udp.nnz() > 0);
+
+        // Different packets should NOT be identical
+        let sim = holon.similarity(&vec_tcp, &vec_udp);
+        assert!(sim < 1.0, "Expected different vectors for different packets, got sim={}", sim);
+
+        // Same packet should be identical to itself
+        let self_sim = holon.similarity(&vec_tcp, &vec_tcp);
+        assert!((self_sim - 1.0).abs() < 0.01, "Self-similarity should be ~1.0, got {}", self_sim);
+    }
+
+    #[test]
+    fn test_walkable_vs_json_similar_encoding() {
+        use serde_json::json;
+
+        let holon = Holon::new(4096);
+
+        // Encode via JSON
+        let json_vec = holon
+            .encode_json(r#"{"type": "billing", "amount": 100}"#)
+            .unwrap();
+
+        // Encode via Walkable (using serde_json::Value which implements Walkable)
+        let value = json!({"type": "billing", "amount": 100});
+        let walkable_vec = holon.encode_walkable(&value);
+
+        // Both should produce similar results (not identical due to implementation details)
+        // but structurally equivalent
+        assert_eq!(json_vec.dimensions(), walkable_vec.dimensions());
+        assert!(json_vec.nnz() > 0);
+        assert!(walkable_vec.nnz() > 0);
+
+        // Should have high similarity (same data structure)
+        let sim = holon.similarity(&json_vec, &walkable_vec);
+        assert!(sim > 0.8, "Expected high similarity between JSON and Walkable encoding, got {}", sim);
+    }
+
+    #[test]
+    fn test_walkable_nested_struct() {
+        use crate::walkable::{WalkType, Walkable, WalkableValue, ScalarValue};
+
+        struct Address {
+            city: String,
+            zip: String,
+        }
+
+        impl Walkable for Address {
+            fn walk_type(&self) -> WalkType {
+                WalkType::Map
+            }
+
+            fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
+                vec![
+                    ("city", self.city.to_walkable_value()),
+                    ("zip", self.zip.to_walkable_value()),
+                ]
+            }
+        }
+
+        struct Person {
+            name: String,
+            address: Address,
+        }
+
+        impl Walkable for Person {
+            fn walk_type(&self) -> WalkType {
+                WalkType::Map
+            }
+
+            fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
+                vec![
+                    ("name", WalkableValue::Scalar(ScalarValue::String(self.name.clone()))),
+                    ("address", self.address.to_walkable_value()),
+                ]
+            }
+        }
+
+        let holon = Holon::new(4096);
+
+        let alice = Person {
+            name: "Alice".into(),
+            address: Address {
+                city: "Seattle".into(),
+                zip: "98101".into(),
+            },
+        };
+
+        let bob = Person {
+            name: "Bob".into(),
+            address: Address {
+                city: "Seattle".into(),
+                zip: "98101".into(),
+            },
+        };
+
+        let vec_alice = holon.encode_walkable(&alice);
+        let vec_bob = holon.encode_walkable(&bob);
+
+        // Same city/zip should give some similarity (shared fields)
+        let sim = holon.similarity(&vec_alice, &vec_bob);
+        assert!(sim > 0.1, "Expected some similarity from shared address, got {}", sim);
+        assert!(sim < 1.0, "Different people should not be identical, got {}", sim);
+    }
+
     #[test]
     fn test_encode_value_direct() {
         use serde_json::json;
@@ -655,9 +851,8 @@ mod tests {
         let holon = Holon::new(4096);
 
         let a = holon.get_vector("A");
-        let b = holon.get_vector("B");
 
-        // Test different metrics
+        // Test different metrics with self-similarity
         let cos = holon.similarity_with_metric(&a, &a, Metric::Cosine);
         let ham = holon.similarity_with_metric(&a, &a, Metric::Hamming);
         let euc = holon.similarity_with_metric(&a, &a, Metric::Euclidean);

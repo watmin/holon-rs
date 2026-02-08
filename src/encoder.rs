@@ -21,6 +21,7 @@ use crate::error::Result;
 use crate::primitives::Primitives;
 use crate::vector::Vector;
 use crate::vector_manager::VectorManager;
+use crate::walkable::{ScalarValue, WalkType, Walkable, WalkableValue};
 use serde_json::Value;
 
 /// Encoder for converting structured data to vectors.
@@ -61,6 +62,188 @@ impl Encoder {
             Value::Array(arr) => self.encode_array(arr, prefix),
             Value::Object(obj) => self.encode_object(obj, prefix),
         }
+    }
+
+    // =========================================================================
+    // Walkable Encoding (zero-serialization)
+    // =========================================================================
+
+    /// Encode any type implementing the Walkable trait.
+    ///
+    /// This is the zero-serialization path: your structs don't need to be
+    /// converted to JSON first. Any type implementing Walkable can be
+    /// encoded directly.
+    ///
+    /// # Example
+    /// ```rust
+    /// struct Person { name: String, age: u32 }
+    ///
+    /// impl Walkable for Person {
+    ///     fn walk_type(&self) -> WalkType { WalkType::Map }
+    ///     fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
+    ///         vec![
+    ///             ("name", self.name.to_walkable_value()),
+    ///             ("age", self.age.to_walkable_value()),
+    ///         ]
+    ///     }
+    /// }
+    ///
+    /// let person = Person { name: "Alice".into(), age: 30 };
+    /// let vec = encoder.encode_walkable(&person);
+    /// ```
+    pub fn encode_walkable<W: Walkable>(&self, walkable: &W) -> Vector {
+        self.encode_walkable_recursive(walkable, None)
+    }
+
+    /// Encode a WalkableValue (for nested structures).
+    pub fn encode_walkable_value(&self, value: &WalkableValue) -> Vector {
+        self.encode_walkable_value_recursive(value, None)
+    }
+
+    fn encode_walkable_recursive<W: Walkable>(&self, walkable: &W, prefix: Option<&str>) -> Vector {
+        match walkable.walk_type() {
+            WalkType::Scalar => {
+                let scalar = walkable.walk_scalar();
+                self.encode_scalar_value(&scalar, prefix)
+            }
+            WalkType::Map => self.encode_walkable_map(walkable, prefix),
+            WalkType::List => self.encode_walkable_list(walkable, prefix),
+            WalkType::Set => self.encode_walkable_set(walkable, prefix),
+        }
+    }
+
+    fn encode_walkable_value_recursive(&self, value: &WalkableValue, prefix: Option<&str>) -> Vector {
+        match value {
+            WalkableValue::Scalar(s) => self.encode_scalar_value(s, prefix),
+            WalkableValue::Map(items) => {
+                if items.is_empty() {
+                    return self.encode_atom(&Self::make_path(prefix, "{}"));
+                }
+
+                let mut vectors: Vec<Vector> = Vec::new();
+
+                for (key, val) in items {
+                    let key_path = Self::make_path(prefix, key);
+                    let role_vec = self.encode_atom(&key_path);
+                    let filler_vec = self.encode_walkable_value_recursive(val, Some(&key_path));
+                    let bound = Primitives::bind(&role_vec, &filler_vec);
+                    vectors.push(bound);
+                }
+
+                let refs: Vec<&Vector> = vectors.iter().collect();
+                Primitives::bundle(&refs)
+            }
+            WalkableValue::List(items) => {
+                if items.is_empty() {
+                    return self.encode_atom(&Self::make_path(prefix, "[]"));
+                }
+
+                let mut vectors: Vec<Vector> = Vec::new();
+
+                for (i, item) in items.iter().enumerate() {
+                    let pos_prefix = Self::make_path(prefix, &format!("[{}]", i));
+                    let item_vec = self.encode_walkable_value_recursive(item, Some(&pos_prefix));
+                    let pos_vec = self.encode_atom(&pos_prefix);
+                    let bound = Primitives::bind(&pos_vec, &item_vec);
+                    vectors.push(bound);
+                }
+
+                let refs: Vec<&Vector> = vectors.iter().collect();
+                Primitives::bundle(&refs)
+            }
+            WalkableValue::Set(items) => {
+                if items.is_empty() {
+                    return self.encode_atom(&Self::make_path(prefix, "#{}"));
+                }
+
+                let set_indicator = self.encode_atom("set_indicator");
+                let mut vectors: Vec<Vector> = Vec::new();
+
+                for item in items {
+                    let item_vec = self.encode_walkable_value_recursive(item, prefix);
+                    vectors.push(item_vec);
+                }
+
+                let refs: Vec<&Vector> = vectors.iter().collect();
+                let bundled = Primitives::bundle(&refs);
+                Primitives::bind(&set_indicator, &bundled)
+            }
+        }
+    }
+
+    fn encode_scalar_value(&self, scalar: &ScalarValue, prefix: Option<&str>) -> Vector {
+        let atom = scalar.to_atom();
+        self.encode_atom(&Self::make_path(prefix, &atom))
+    }
+
+    fn encode_walkable_map<W: Walkable>(&self, walkable: &W, prefix: Option<&str>) -> Vector {
+        let items = walkable.walk_map_items();
+
+        if items.is_empty() {
+            return self.encode_atom(&Self::make_path(prefix, "{}"));
+        }
+
+        let mut vectors: Vec<Vector> = Vec::new();
+
+        for (key, value) in items {
+            let key_path = Self::make_path(prefix, key);
+
+            // Role vector (the key)
+            let role_vec = self.encode_atom(&key_path);
+
+            // Filler vector (the value)
+            let filler_vec = self.encode_walkable_value_recursive(&value, Some(&key_path));
+
+            // Role-filler binding
+            let bound = Primitives::bind(&role_vec, &filler_vec);
+            vectors.push(bound);
+        }
+
+        let refs: Vec<&Vector> = vectors.iter().collect();
+        Primitives::bundle(&refs)
+    }
+
+    fn encode_walkable_list<W: Walkable>(&self, walkable: &W, prefix: Option<&str>) -> Vector {
+        let items = walkable.walk_list_items();
+
+        if items.is_empty() {
+            return self.encode_atom(&Self::make_path(prefix, "[]"));
+        }
+
+        let mut vectors: Vec<Vector> = Vec::new();
+
+        for (i, item) in items.iter().enumerate() {
+            let pos_prefix = Self::make_path(prefix, &format!("[{}]", i));
+            let item_vec = self.encode_walkable_value_recursive(item, Some(&pos_prefix));
+
+            // Bind with position marker
+            let pos_vec = self.encode_atom(&pos_prefix);
+            let bound = Primitives::bind(&pos_vec, &item_vec);
+            vectors.push(bound);
+        }
+
+        let refs: Vec<&Vector> = vectors.iter().collect();
+        Primitives::bundle(&refs)
+    }
+
+    fn encode_walkable_set<W: Walkable>(&self, walkable: &W, prefix: Option<&str>) -> Vector {
+        let items = walkable.walk_set_items();
+
+        if items.is_empty() {
+            return self.encode_atom(&Self::make_path(prefix, "#{}"));
+        }
+
+        let set_indicator = self.encode_atom("set_indicator");
+        let mut vectors: Vec<Vector> = Vec::new();
+
+        for item in items {
+            let item_vec = self.encode_walkable_value_recursive(&item, prefix);
+            vectors.push(item_vec);
+        }
+
+        let refs: Vec<&Vector> = vectors.iter().collect();
+        let bundled = Primitives::bundle(&refs);
+        Primitives::bind(&set_indicator, &bundled)
     }
 
     fn make_path(prefix: Option<&str>, key: &str) -> String {
