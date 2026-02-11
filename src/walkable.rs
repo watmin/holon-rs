@@ -56,10 +56,16 @@ pub enum ScalarValue {
     Float(f64),
     Bool(bool),
     Null,
+    /// Log-scale encoding: equal ratios = equal similarity drops.
+    /// Use for: packet rates, file sizes, frequencies, byte counts.
+    LogFloat { value: f64, scale: f64 },
+    /// Linear positional encoding: equal differences = equal similarity drops.
+    /// Use for: temperatures, positions, timestamps.
+    LinearFloat { value: f64, scale: f64 },
 }
 
 impl ScalarValue {
-    /// Convert to string for vector lookup.
+    /// Convert to string for vector lookup (for string-based scalars).
     pub fn to_atom(&self) -> String {
         match self {
             ScalarValue::String(s) => s.clone(),
@@ -67,7 +73,57 @@ impl ScalarValue {
             ScalarValue::Float(f) => f.to_string(),
             ScalarValue::Bool(b) => b.to_string(),
             ScalarValue::Null => "null".to_string(),
+            // Numeric scalars don't use atom encoding - handled specially by encoder
+            ScalarValue::LogFloat { value, .. } => format!("$log:{}", value),
+            ScalarValue::LinearFloat { value, .. } => format!("$linear:{}", value),
         }
+    }
+
+    /// Create a log-scale scalar with default scale (1000.0).
+    ///
+    /// # Example
+    /// ```rust
+    /// use holon::ScalarValue;
+    /// let rate = ScalarValue::log(1000.0);
+    /// ```
+    pub fn log(value: f64) -> Self {
+        ScalarValue::LogFloat {
+            value,
+            scale: 1000.0,
+        }
+    }
+
+    /// Create a log-scale scalar with custom scale.
+    ///
+    /// Higher scale = slower similarity decay for same ratio.
+    pub fn log_with_scale(value: f64, scale: f64) -> Self {
+        ScalarValue::LogFloat { value, scale }
+    }
+
+    /// Create a linear-scale scalar with default scale (1000.0).
+    ///
+    /// # Example
+    /// ```rust
+    /// use holon::ScalarValue;
+    /// let temp = ScalarValue::linear(25.0);
+    /// ```
+    pub fn linear(value: f64) -> Self {
+        ScalarValue::LinearFloat {
+            value,
+            scale: 1000.0,
+        }
+    }
+
+    /// Create a linear-scale scalar with custom scale.
+    ///
+    /// Higher scale = slower similarity decay for same difference.
+    pub fn linear_with_scale(value: f64, scale: f64) -> Self {
+        ScalarValue::LinearFloat { value, scale }
+    }
+
+    /// Check if this is a numeric scalar requiring special encoding.
+    pub fn is_numeric_scalar(&self) -> bool {
+        matches!(self, ScalarValue::LogFloat { .. } | ScalarValue::LinearFloat { .. })
     }
 }
 
@@ -83,6 +139,10 @@ pub enum ScalarRef<'a> {
     Float(f64),
     Bool(bool),
     Null,
+    /// Log-scale encoding reference.
+    LogFloat { value: f64, scale: f64 },
+    /// Linear-scale encoding reference.
+    LinearFloat { value: f64, scale: f64 },
 }
 
 impl<'a> ScalarRef<'a> {
@@ -96,6 +156,9 @@ impl<'a> ScalarRef<'a> {
             ScalarRef::Float(f) => f.to_string(),
             ScalarRef::Bool(b) => b.to_string(),
             ScalarRef::Null => "null".to_string(),
+            // Numeric scalars don't use atom encoding
+            ScalarRef::LogFloat { value, .. } => format!("$log:{}", value),
+            ScalarRef::LinearFloat { value, .. } => format!("$linear:{}", value),
         }
     }
 
@@ -107,7 +170,53 @@ impl<'a> ScalarRef<'a> {
             ScalarRef::Float(f) => ScalarValue::Float(*f),
             ScalarRef::Bool(b) => ScalarValue::Bool(*b),
             ScalarRef::Null => ScalarValue::Null,
+            ScalarRef::LogFloat { value, scale } => ScalarValue::LogFloat {
+                value: *value,
+                scale: *scale,
+            },
+            ScalarRef::LinearFloat { value, scale } => ScalarValue::LinearFloat {
+                value: *value,
+                scale: *scale,
+            },
         }
+    }
+
+    /// Create a log-scale reference with default scale.
+    #[inline]
+    pub fn log(value: f64) -> Self {
+        ScalarRef::LogFloat {
+            value,
+            scale: 1000.0,
+        }
+    }
+
+    /// Create a log-scale reference with custom scale.
+    #[inline]
+    pub fn log_with_scale(value: f64, scale: f64) -> Self {
+        ScalarRef::LogFloat { value, scale }
+    }
+
+    /// Create a linear-scale reference with default scale.
+    #[inline]
+    pub fn linear(value: f64) -> Self {
+        ScalarRef::LinearFloat {
+            value,
+            scale: 1000.0,
+        }
+    }
+
+    /// Create a linear-scale reference with custom scale.
+    #[inline]
+    pub fn linear_with_scale(value: f64, scale: f64) -> Self {
+        ScalarRef::LinearFloat { value, scale }
+    }
+
+    /// Check if this is a numeric scalar requiring special encoding.
+    pub fn is_numeric_scalar(&self) -> bool {
+        matches!(
+            self,
+            ScalarRef::LogFloat { .. } | ScalarRef::LinearFloat { .. }
+        )
     }
 }
 
@@ -273,6 +382,8 @@ pub trait Walkable {
             ScalarValue::Float(f) => ScalarRef::Float(f),
             ScalarValue::Bool(b) => ScalarRef::Bool(b),
             ScalarValue::Null => ScalarRef::Null,
+            ScalarValue::LogFloat { value, scale } => ScalarRef::LogFloat { value, scale },
+            ScalarValue::LinearFloat { value, scale } => ScalarRef::LinearFloat { value, scale },
         }
     }
 
@@ -334,6 +445,18 @@ fn walkable_value_to_ref(value: &WalkableValue) -> WalkableRef<'_> {
             ScalarValue::Float(f) => WalkableRef::Scalar(ScalarRef::Float(*f)),
             ScalarValue::Bool(b) => WalkableRef::Scalar(ScalarRef::Bool(*b)),
             ScalarValue::Null => WalkableRef::Scalar(ScalarRef::Null),
+            ScalarValue::LogFloat { value, scale } => {
+                WalkableRef::Scalar(ScalarRef::LogFloat {
+                    value: *value,
+                    scale: *scale,
+                })
+            }
+            ScalarValue::LinearFloat { value, scale } => {
+                WalkableRef::Scalar(ScalarRef::LinearFloat {
+                    value: *value,
+                    scale: *scale,
+                })
+            }
         },
         // For nested structures, we can't easily convert without allocation
         // The visitor pattern works best for flat structures

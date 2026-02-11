@@ -177,15 +177,35 @@ impl Encoder {
     }
 
     fn encode_scalar_value(&self, scalar: &ScalarValue, prefix: Option<&str>) -> Vector {
-        let atom = scalar.to_atom();
-        self.encode_atom(&Self::make_path(prefix, &atom))
+        // Handle numeric scalars with magnitude-aware encoding
+        match scalar {
+            ScalarValue::LogFloat { value, scale } => {
+                self.encode_scalar_log(*value, *scale)
+            }
+            ScalarValue::LinearFloat { value, scale } => {
+                self.encode_scalar_linear(*value, *scale)
+            }
+            // Standard scalars use atom encoding
+            _ => {
+                let atom = scalar.to_atom();
+                self.encode_atom(&Self::make_path(prefix, &atom))
+            }
+        }
     }
 
     /// Encode a scalar reference (zero-allocation path).
     #[inline]
     fn encode_scalar_ref(&self, scalar: ScalarRef<'_>, prefix: Option<&str>) -> Vector {
-        let atom = scalar.to_atom();
-        self.encode_atom(&Self::make_path(prefix, &atom))
+        // Handle numeric scalars with magnitude-aware encoding
+        match scalar {
+            ScalarRef::LogFloat { value, scale } => self.encode_scalar_log(value, scale),
+            ScalarRef::LinearFloat { value, scale } => self.encode_scalar_linear(value, scale),
+            // Standard scalars use atom encoding
+            _ => {
+                let atom = scalar.to_atom();
+                self.encode_atom(&Self::make_path(prefix, &atom))
+            }
+        }
     }
 
     fn encode_walkable_map<W: Walkable>(&self, walkable: &W, prefix: Option<&str>) -> Vector {
@@ -335,8 +355,102 @@ impl Encoder {
         Primitives::bundle(&refs)
     }
 
+    // =========================================================================
+    // Numeric Scalar Markers ($log, $linear, $scale)
+    // =========================================================================
+
+    /// Check if an object is a numeric scalar marker ($log or $linear).
+    fn is_numeric_scalar_marker(obj: &serde_json::Map<String, Value>) -> bool {
+        obj.contains_key("$log") || obj.contains_key("$linear")
+    }
+
+    /// Encode a numeric scalar marker.
+    ///
+    /// Supports:
+    /// - `{"$log": value}` - Log10 encoding (equal ratios = equal similarity)
+    /// - `{"$linear": value}` - Linear positional encoding
+    /// - `{"$log": value, "$scale": 500}` - Custom scale parameter
+    fn encode_numeric_scalar_marker(&self, obj: &serde_json::Map<String, Value>) -> Vector {
+        let scale = obj
+            .get("$scale")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1000.0);
+
+        if let Some(value) = obj.get("$log") {
+            if let Some(num) = value.as_f64() {
+                return self.encode_scalar_log(num, scale);
+            }
+        }
+
+        if let Some(value) = obj.get("$linear") {
+            if let Some(num) = value.as_f64() {
+                return self.encode_scalar_linear(num, scale);
+            }
+        }
+
+        // Fallback: shouldn't happen if is_numeric_scalar_marker was checked
+        Vector::zeros(self.dimensions())
+    }
+
+    /// Encode a scalar value using log10 scale.
+    ///
+    /// Equal ratios produce equal similarity drops:
+    /// - 100 → 1000 (10x) has same similarity drop as 1000 → 10000 (10x)
+    ///
+    /// # Arguments
+    /// * `value` - The value to encode (must be > 0)
+    /// * `scale` - Controls similarity decay rate (default 1000.0)
+    pub fn encode_scalar_log(&self, value: f64, scale: f64) -> Vector {
+        if value <= 0.0 {
+            return Vector::zeros(self.dimensions());
+        }
+        let log_value = value.log10();
+        self.encode_scalar_positional(log_value, scale)
+    }
+
+    /// Encode a scalar value using linear positional encoding.
+    ///
+    /// Equal absolute differences produce equal similarity drops:
+    /// - 10 → 20 (+10) has same similarity drop as 100 → 110 (+10)
+    ///
+    /// # Arguments
+    /// * `value` - The value to encode
+    /// * `scale` - Controls similarity decay rate (default 1000.0)
+    pub fn encode_scalar_linear(&self, value: f64, scale: f64) -> Vector {
+        self.encode_scalar_positional(value, scale)
+    }
+
+    /// Transformer-style positional encoding.
+    fn encode_scalar_positional(&self, position: f64, scale: f64) -> Vector {
+        let dim = self.dimensions();
+        let mut data = vec![0i8; dim];
+
+        for i in 0..dim {
+            let freq = 1.0 / scale.powf(i as f64 / dim as f64);
+            let value = if i % 2 == 0 {
+                (position * freq).sin()
+            } else {
+                (position * freq).cos()
+            };
+            data[i] = if value > 0.0 {
+                1
+            } else if value < 0.0 {
+                -1
+            } else {
+                0
+            };
+        }
+
+        Vector::from_data(data)
+    }
+
     /// Encode an object using role-filler binding.
     fn encode_object(&self, obj: &serde_json::Map<String, Value>, prefix: Option<&str>) -> Vector {
+        // Check for numeric scalar markers at top level
+        if Self::is_numeric_scalar_marker(obj) {
+            return self.encode_numeric_scalar_marker(obj);
+        }
+
         if obj.is_empty() {
             return self.encode_atom(&Self::make_path(prefix, "{}"));
         }
@@ -350,7 +464,16 @@ impl Encoder {
             let role_vec = self.encode_atom(&key_path);
 
             // Filler vector (the value, with key as prefix for nested structure)
-            let filler_vec = self.encode_value(value, Some(&key_path));
+            // Check if value is a numeric scalar marker
+            let filler_vec = if let Value::Object(inner_obj) = value {
+                if Self::is_numeric_scalar_marker(inner_obj) {
+                    self.encode_numeric_scalar_marker(inner_obj)
+                } else {
+                    self.encode_value(value, Some(&key_path))
+                }
+            } else {
+                self.encode_value(value, Some(&key_path))
+            };
 
             // Role-filler binding: bind the key with its value
             let bound = Primitives::bind(&role_vec, &filler_vec);
@@ -450,6 +573,365 @@ mod tests {
             .expect("Failed to encode JSON");
 
         assert_eq!(vec.dimensions(), 4096);
+    }
+
+    // =========================================================================
+    // Numeric Marker Tests ($log, $linear, $scale)
+    // =========================================================================
+
+    #[test]
+    fn test_log_marker_basic() {
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        // Values with 10x ratio should have similar distance
+        let v100 = encoder.encode_json(r#"{"$log": 100}"#).unwrap();
+        let v1000 = encoder.encode_json(r#"{"$log": 1000}"#).unwrap();
+        let v10000 = encoder.encode_json(r#"{"$log": 10000}"#).unwrap();
+
+        let sim_100_1000 = Similarity::cosine(&v100, &v1000);
+        let sim_1000_10000 = Similarity::cosine(&v1000, &v10000);
+
+        // 10x ratios should produce approximately equal similarity drops
+        // (with some tolerance for quantization effects)
+        let diff = (sim_100_1000 - sim_1000_10000).abs();
+        assert!(
+            diff < 0.1,
+            "Expected similar similarity drops for 10x ratios, got {} vs {} (diff={})",
+            sim_100_1000,
+            sim_1000_10000,
+            diff
+        );
+    }
+
+    #[test]
+    fn test_log_marker_magnitude_ordering() {
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        let v100 = encoder.encode_json(r#"{"$log": 100}"#).unwrap();
+        let v200 = encoder.encode_json(r#"{"$log": 200}"#).unwrap();
+        let v10000 = encoder.encode_json(r#"{"$log": 10000}"#).unwrap();
+
+        let sim_close = Similarity::cosine(&v100, &v200);
+        let sim_far = Similarity::cosine(&v100, &v10000);
+
+        // Closer values should have higher similarity
+        assert!(
+            sim_close > sim_far,
+            "Expected closer values to be more similar, got {} vs {}",
+            sim_close,
+            sim_far
+        );
+    }
+
+    #[test]
+    fn test_log_marker_with_scale() {
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        // Higher scale = slower similarity decay
+        let v100_default = encoder.encode_json(r#"{"$log": 100}"#).unwrap();
+        let v1000_default = encoder.encode_json(r#"{"$log": 1000}"#).unwrap();
+
+        let v100_high = encoder.encode_json(r#"{"$log": 100, "$scale": 5000}"#).unwrap();
+        let v1000_high = encoder.encode_json(r#"{"$log": 1000, "$scale": 5000}"#).unwrap();
+
+        let sim_default = Similarity::cosine(&v100_default, &v1000_default);
+        let sim_high_scale = Similarity::cosine(&v100_high, &v1000_high);
+
+        // Higher scale should produce higher similarity for same ratio
+        assert!(
+            sim_high_scale > sim_default,
+            "Expected higher scale to give higher similarity, got {} vs {}",
+            sim_high_scale,
+            sim_default
+        );
+    }
+
+    #[test]
+    fn test_linear_marker_basic() {
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        let v0 = encoder.encode_json(r#"{"$linear": 0}"#).unwrap();
+        let v10 = encoder.encode_json(r#"{"$linear": 10}"#).unwrap();
+        let v50 = encoder.encode_json(r#"{"$linear": 50}"#).unwrap();
+
+        let sim_0_10 = Similarity::cosine(&v0, &v10);
+        let sim_0_50 = Similarity::cosine(&v0, &v50);
+
+        // Closer values should have higher similarity
+        assert!(
+            sim_0_10 > sim_0_50,
+            "Expected sim(0,10) > sim(0,50), got {} vs {}",
+            sim_0_10,
+            sim_0_50
+        );
+    }
+
+    #[test]
+    fn test_linear_vs_log_for_different_use_cases() {
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        // Linear: 10 → 20 (+10) vs 100 → 110 (+10) should have similar drops
+        let v10_lin = encoder.encode_json(r#"{"$linear": 10}"#).unwrap();
+        let v20_lin = encoder.encode_json(r#"{"$linear": 20}"#).unwrap();
+        let v100_lin = encoder.encode_json(r#"{"$linear": 100}"#).unwrap();
+        let v110_lin = encoder.encode_json(r#"{"$linear": 110}"#).unwrap();
+
+        let sim_lin_10_20 = Similarity::cosine(&v10_lin, &v20_lin);
+        let sim_lin_100_110 = Similarity::cosine(&v100_lin, &v110_lin);
+
+        // For linear encoding, equal absolute differences should give similar similarity
+        let diff_lin = (sim_lin_10_20 - sim_lin_100_110).abs();
+        assert!(
+            diff_lin < 0.1,
+            "Linear: Expected similar drops for +10 differences, got {} vs {} (diff={})",
+            sim_lin_10_20,
+            sim_lin_100_110,
+            diff_lin
+        );
+
+        // Log: 10 → 20 (2x) vs 100 → 200 (2x) should have similar drops
+        let v10_log = encoder.encode_json(r#"{"$log": 10}"#).unwrap();
+        let v20_log = encoder.encode_json(r#"{"$log": 20}"#).unwrap();
+        let v100_log = encoder.encode_json(r#"{"$log": 100}"#).unwrap();
+        let v200_log = encoder.encode_json(r#"{"$log": 200}"#).unwrap();
+
+        let sim_log_10_20 = Similarity::cosine(&v10_log, &v20_log);
+        let sim_log_100_200 = Similarity::cosine(&v100_log, &v200_log);
+
+        // For log encoding, equal ratios should give similar similarity
+        let diff_log = (sim_log_10_20 - sim_log_100_200).abs();
+        assert!(
+            diff_log < 0.1,
+            "Log: Expected similar drops for 2x ratios, got {} vs {} (diff={})",
+            sim_log_10_20,
+            sim_log_100_200,
+            diff_log
+        );
+    }
+
+    #[test]
+    fn test_marker_in_record() {
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        // Records with log-encoded rates
+        let r1 = encoder
+            .encode_json(r#"{"type": "traffic", "rate": {"$log": 1000}}"#)
+            .unwrap();
+        let r2 = encoder
+            .encode_json(r#"{"type": "traffic", "rate": {"$log": 1100}}"#)
+            .unwrap();
+        let r3 = encoder
+            .encode_json(r#"{"type": "traffic", "rate": {"$log": 50000}}"#)
+            .unwrap();
+
+        let sim_close = Similarity::cosine(&r1, &r2);
+        let sim_far = Similarity::cosine(&r1, &r3);
+
+        // Records with similar rates should be more similar
+        assert!(
+            sim_close > sim_far,
+            "Expected records with similar rates to be more similar, got {} vs {}",
+            sim_close,
+            sim_far
+        );
+    }
+
+    #[test]
+    fn test_string_vs_log_encoding() {
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        // String encoding: 100 and 101 are completely different strings
+        let s100 = encoder.encode_json(r#"{"rate": 100}"#).unwrap();
+        let s101 = encoder.encode_json(r#"{"rate": 101}"#).unwrap();
+        let sim_string = Similarity::cosine(&s100, &s101);
+
+        // Log encoding: 100 and 101 are very similar magnitudes
+        let l100 = encoder.encode_json(r#"{"rate": {"$log": 100}}"#).unwrap();
+        let l101 = encoder.encode_json(r#"{"rate": {"$log": 101}}"#).unwrap();
+        let sim_log = Similarity::cosine(&l100, &l101);
+
+        // Log should produce higher similarity for nearby values
+        assert!(
+            sim_log > sim_string,
+            "Expected log encoding to show higher similarity for nearby values, got {} vs {}",
+            sim_log,
+            sim_string
+        );
+    }
+
+    // =========================================================================
+    // Walkable Numeric Scalar Tests
+    // =========================================================================
+
+    #[test]
+    fn test_walkable_log_scalar() {
+        use crate::walkable::{WalkType, Walkable, WalkableValue, ScalarValue};
+
+        struct TrafficRecord {
+            traffic_type: String,
+            rate: f64,
+        }
+
+        impl Walkable for TrafficRecord {
+            fn walk_type(&self) -> WalkType {
+                WalkType::Map
+            }
+
+            fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
+                vec![
+                    ("type", WalkableValue::Scalar(ScalarValue::String(self.traffic_type.clone()))),
+                    ("rate", WalkableValue::Scalar(ScalarValue::log(self.rate))),
+                ]
+            }
+        }
+
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        let r1 = TrafficRecord {
+            traffic_type: "http".into(),
+            rate: 1000.0,
+        };
+        let r2 = TrafficRecord {
+            traffic_type: "http".into(),
+            rate: 1100.0,
+        };
+        let r3 = TrafficRecord {
+            traffic_type: "http".into(),
+            rate: 50000.0,
+        };
+
+        let v1 = encoder.encode_walkable(&r1);
+        let v2 = encoder.encode_walkable(&r2);
+        let v3 = encoder.encode_walkable(&r3);
+
+        let sim_close = Similarity::cosine(&v1, &v2);
+        let sim_far = Similarity::cosine(&v1, &v3);
+
+        // Similar rates should produce higher similarity
+        assert!(
+            sim_close > sim_far,
+            "Expected similar rates to be more similar, got {} vs {}",
+            sim_close,
+            sim_far
+        );
+    }
+
+    #[test]
+    fn test_walkable_linear_scalar() {
+        use crate::walkable::{WalkType, Walkable, WalkableValue, ScalarValue};
+
+        struct Measurement {
+            sensor: String,
+            temperature: f64,
+        }
+
+        impl Walkable for Measurement {
+            fn walk_type(&self) -> WalkType {
+                WalkType::Map
+            }
+
+            fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
+                vec![
+                    ("sensor", WalkableValue::Scalar(ScalarValue::String(self.sensor.clone()))),
+                    ("temp", WalkableValue::Scalar(ScalarValue::linear(self.temperature))),
+                ]
+            }
+        }
+
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        let m1 = Measurement {
+            sensor: "room_a".into(),
+            temperature: 20.0,
+        };
+        let m2 = Measurement {
+            sensor: "room_a".into(),
+            temperature: 22.0,
+        };
+        let m3 = Measurement {
+            sensor: "room_a".into(),
+            temperature: 50.0,
+        };
+
+        let v1 = encoder.encode_walkable(&m1);
+        let v2 = encoder.encode_walkable(&m2);
+        let v3 = encoder.encode_walkable(&m3);
+
+        let sim_close = Similarity::cosine(&v1, &v2);
+        let sim_far = Similarity::cosine(&v1, &v3);
+
+        // Similar temperatures should produce higher similarity
+        assert!(
+            sim_close > sim_far,
+            "Expected similar temperatures to be more similar, got {} vs {}",
+            sim_close,
+            sim_far
+        );
+    }
+
+    #[test]
+    fn test_walkable_visitor_with_log_scalar() {
+        use crate::walkable::{WalkType, Walkable, WalkableValue, WalkableRef, ScalarValue};
+
+        struct FastTrafficRecord {
+            traffic_type: String,
+            rate: f64,
+        }
+
+        impl Walkable for FastTrafficRecord {
+            fn walk_type(&self) -> WalkType {
+                WalkType::Map
+            }
+
+            fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
+                vec![
+                    ("type", WalkableValue::Scalar(ScalarValue::String(self.traffic_type.clone()))),
+                    ("rate", WalkableValue::Scalar(ScalarValue::log(self.rate))),
+                ]
+            }
+
+            fn has_fast_visitor(&self) -> bool {
+                true
+            }
+
+            fn walk_map_visitor(&self, visitor: &mut dyn FnMut(&str, WalkableRef<'_>)) {
+                visitor("type", WalkableRef::string(&self.traffic_type));
+                visitor("rate", WalkableRef::Scalar(crate::walkable::ScalarRef::log(self.rate)));
+            }
+        }
+
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        let r1 = FastTrafficRecord {
+            traffic_type: "http".into(),
+            rate: 1000.0,
+        };
+        let r2 = FastTrafficRecord {
+            traffic_type: "http".into(),
+            rate: 1100.0,
+        };
+
+        let v1 = encoder.encode_walkable(&r1);
+        let v2 = encoder.encode_walkable(&r2);
+
+        let sim = Similarity::cosine(&v1, &v2);
+
+        // Similar rates should have high similarity
+        assert!(
+            sim > 0.5,
+            "Expected similar rates to have high similarity, got {}",
+            sim
+        );
     }
 
     #[test]

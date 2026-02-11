@@ -48,6 +48,7 @@ pub enum ScalarMode {
 }
 
 /// Encoder for continuous scalar values.
+#[derive(Clone)]
 pub struct ScalarEncoder {
     dimensions: usize,
     /// Base random vector for scalar encoding

@@ -184,6 +184,38 @@ let h23 = holon.encode_scalar(23.0, ScalarMode::Circular { period: 24.0 });
 let h0 = holon.encode_scalar(0.0, ScalarMode::Circular { period: 24.0 });
 ```
 
+### Inline Numeric Markers ($log, $linear)
+
+Embed magnitude-aware encoding directly in JSON records:
+
+```rust
+// Without marker: "100" and "101" are completely different strings
+let r1 = holon.encode_json(r#"{"rate": 100}"#)?;
+let r2 = holon.encode_json(r#"{"rate": 101}"#)?;
+// Low similarity - different strings
+
+// With $log marker: values encode by magnitude
+let r1 = holon.encode_json(r#"{"rate": {"$log": 100}}"#)?;
+let r2 = holon.encode_json(r#"{"rate": {"$log": 101}}"#)?;
+// High similarity - similar magnitudes
+
+// $log: Equal ratios = equal similarity drops (good for rates, sizes, frequencies)
+// - 100 → 1000 (10x) same drop as 1000 → 10000 (10x)
+
+// $linear: Equal differences = equal similarity drops (good for temperatures, positions)
+// - 10 → 20 (+10) same drop as 100 → 110 (+10)
+
+// Control decay rate with $scale
+let slow_decay = holon.encode_json(r#"{"rate": {"$log": 100, "$scale": 5000}}"#)?;
+// Higher scale = more similar for same ratio
+```
+
+| Marker | Use Case | Similarity Property |
+|--------|----------|---------------------|
+| `$log` | Packet rates, file sizes, frequencies | Equal ratios = equal similarity |
+| `$linear` | Temperatures, positions, timestamps | Equal differences = equal similarity |
+| `$scale` | Tune sensitivity | Higher = slower decay |
+
 ### Accumulators: Frequency Matters
 
 The secret weapon for anomaly detection:
@@ -222,6 +254,9 @@ cargo run --example improved_detection --release
 
 # Targeted rate limiting (wider separation)
 cargo run --example targeted_rate_limiting --release
+
+# Magnitude-aware encoding (Batch 015 - $log/$linear markers)
+cargo run --example magnitude_aware_encoding --release
 
 # Run all tests
 cargo test
@@ -287,6 +322,7 @@ holon-rs/
 | Extended primitives (Batch 014) | ✅ | ✅ |
 | Accumulators | ✅ | ✅ |
 | Scalar encoding (linear/log/circular) | ✅ | ✅ |
+| Inline numeric markers ($log, $linear) | ✅ | ✅ |
 | Sequence encoding | ✅ | ✅ |
 | SIMD acceleration | ❌ | ✅ |
 | Zero-hardcode detection | ✅ | ✅ (12x faster) |
