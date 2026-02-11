@@ -144,12 +144,28 @@ All the mystical operations:
 | Primitive | Spell | Effect |
 |-----------|-------|--------|
 | `bind(a, b)` | Entanglement | Creates reversible association |
+| `unbind(ab, a)` | Unraveling | Retrieves bound value |
 | `bundle([a,b,c])` | Superposition | Combines into one (similar to all) |
 | `negate(abc, b)` | Banishment | Removes component |
 | `amplify(abc, a, 2.0)` | Empowerment | Strengthens component |
 | `prototype([...])` | Essence Extraction | Finds common pattern |
 | `difference(a, b)` | Delta Vision | The change is a vector |
 | `blend(a, b, 0.7)` | Fusion | Weighted combination |
+
+### Extended Primitives (Batch 014)
+
+New operations for explainable anomaly forensics:
+
+| Primitive | Effect |
+|-----------|--------|
+| `segment(stream, w, t)` | Find WHEN behavior changed |
+| `complexity(v)` | Measure HOW mixed the signal is (0.0-1.0) |
+| `invert(v, codebook)` | Decompose WHAT patterns are present |
+| `similarity_profile(a, b)` | See WHERE dimensions agree/disagree |
+| `attend(q, m, s, mode)` | Soft attention - focus on relevant dims |
+| `project(v, subspace)` | Check IF in known subspace |
+| `analogy(a, b, c)` | A:B::C:? pattern transfer |
+| `conditional_bind(a, b, g)` | Gated binding by condition |
 
 ### Continuous Scalar Encoding
 
@@ -195,6 +211,9 @@ cargo run --example zero_hardcode_detection --release --features simd
 # Pure vector rate detection
 cargo run --example pure_vector_rate --release --features simd
 
+# Explainable anomaly forensics (Batch 014 - extended primitives)
+cargo run --example explainable_forensics --release
+
 # Run all tests
 cargo test
 
@@ -234,7 +253,8 @@ holon-rs/
 │   └── error.rs         # Error types
 ├── examples/
 │   ├── zero_hardcode_detection.rs  # Full Batch 012 demo
-│   └── pure_vector_rate.rs         # Challenge 008 port
+│   ├── pure_vector_rate.rs         # Challenge 008 port
+│   └── explainable_forensics.rs    # Batch 014 extended primitives
 └── benches/
     └── benchmarks.rs    # Criterion benchmarks
 ```
@@ -252,6 +272,7 @@ holon-rs/
 | Deterministic vectors | ✅ | ✅ |
 | Role-filler binding | ✅ | ✅ |
 | All VSA primitives | ✅ | ✅ |
+| Extended primitives (Batch 014) | ✅ | ✅ |
 | Accumulators | ✅ | ✅ |
 | Scalar encoding (linear/log/circular) | ✅ | ✅ |
 | Sequence encoding | ✅ | ✅ |
