@@ -69,7 +69,7 @@ impl VectorManager {
     /// Compute a deterministic vector for an atom.
     ///
     /// Uses SHA-256 hash of (global_seed || atom) to seed a ChaCha8 RNG,
-    /// then generates random bipolar values.
+    /// then generates random bipolar values in {-1, 0, 1}.
     fn compute_vector(&self, atom: &str) -> Vector {
         // Hash the atom with global seed
         let mut hasher = Sha256::new();
@@ -83,12 +83,17 @@ impl VectorManager {
         // Create RNG from seed
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
-        // Generate random bipolar vector
+        // Generate random bipolar vector with {-1, 0, 1}
+        // Match Python's distribution: 1/3 probability each
         let mut data = vec![0i8; self.dimensions];
         for i in 0..self.dimensions {
-            // Use next u32 to determine sign
-            let r = rng.next_u32();
-            data[i] = if r & 1 == 0 { 1 } else { -1 };
+            let r = rng.next_u32() % 3;
+            data[i] = match r {
+                0 => -1,
+                1 => 0,
+                2 => 1,
+                _ => unreachable!(),
+            };
         }
 
         Vector::from_data(data)
