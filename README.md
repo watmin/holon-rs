@@ -214,6 +214,15 @@ cargo run --example pure_vector_rate --release --features simd
 # Explainable anomaly forensics (Batch 014 - extended primitives)
 cargo run --example explainable_forensics --release
 
+# Zero-shot attack variant detection (analogy)
+cargo run --example attack_variant_detection --release
+
+# Improved detection with pattern attribution
+cargo run --example improved_detection --release
+
+# Targeted rate limiting (wider separation)
+cargo run --example targeted_rate_limiting --release
+
 # Run all tests
 cargo test
 
@@ -254,7 +263,10 @@ holon-rs/
 ├── examples/
 │   ├── zero_hardcode_detection.rs  # Full Batch 012 demo
 │   ├── pure_vector_rate.rs         # Challenge 008 port
-│   └── explainable_forensics.rs    # Batch 014 extended primitives
+│   ├── explainable_forensics.rs    # Batch 014 extended primitives
+│   ├── attack_variant_detection.rs # Zero-shot detection via analogy
+│   ├── improved_detection.rs       # Pattern attribution
+│   └── targeted_rate_limiting.rs   # Dimension-level rate limiting
 └── benches/
     └── benchmarks.rs    # Criterion benchmarks
 ```
