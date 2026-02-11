@@ -45,7 +45,9 @@ impl Encoder {
     ///
     /// # Example
     /// ```rust
-    /// let vec = encoder.encode_json(r#"{"type": "billing", "amount": 100}"#)?;
+    /// use holon::Holon;
+    /// let holon = Holon::new(4096);
+    /// let vec = holon.encode_json(r#"{"type": "billing", "amount": 100}"#).unwrap();
     /// ```
     pub fn encode_json(&self, json: &str) -> Result<Vector> {
         let value: Value = serde_json::from_str(json)?;
@@ -76,20 +78,23 @@ impl Encoder {
     ///
     /// # Example
     /// ```rust
+    /// use holon::{Holon, Walkable, WalkType, WalkableValue, ScalarValue};
+    ///
     /// struct Person { name: String, age: u32 }
     ///
     /// impl Walkable for Person {
     ///     fn walk_type(&self) -> WalkType { WalkType::Map }
     ///     fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
     ///         vec![
-    ///             ("name", self.name.to_walkable_value()),
-    ///             ("age", self.age.to_walkable_value()),
+    ///             ("name", WalkableValue::Scalar(ScalarValue::String(self.name.clone()))),
+    ///             ("age", WalkableValue::Scalar(ScalarValue::Int(self.age as i64))),
     ///         ]
     ///     }
     /// }
     ///
+    /// let holon = Holon::new(4096);
     /// let person = Person { name: "Alice".into(), age: 30 };
-    /// let vec = encoder.encode_walkable(&person);
+    /// let vec = holon.encode_walkable(&person);
     /// ```
     pub fn encode_walkable<W: Walkable>(&self, walkable: &W) -> Vector {
         self.encode_walkable_recursive(walkable, None)

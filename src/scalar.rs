@@ -161,6 +161,8 @@ impl ScalarEncoder {
     ///
     /// # Example
     /// ```rust
+    /// use holon::ScalarEncoder;
+    /// let encoder = ScalarEncoder::new(4096);
     /// let e100 = encoder.encode_log(100.0);   // log10(100) = 2
     /// let e1000 = encoder.encode_log(1000.0); // log10(1000) = 3
     /// let e10000 = encoder.encode_log(10000.0); // log10(10000) = 4
@@ -180,6 +182,8 @@ impl ScalarEncoder {
     ///
     /// # Example
     /// ```rust
+    /// use holon::ScalarEncoder;
+    /// let encoder = ScalarEncoder::new(4096);
     /// // Base 10: each 10x has same similarity drop
     /// let v = encoder.encode_log_base(1000.0, 10.0);
     ///

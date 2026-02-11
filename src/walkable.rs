@@ -12,7 +12,7 @@
 //! # Example
 //!
 //! ```rust
-//! use holon::{Walkable, WalkType, ScalarValue};
+//! use holon::{Walkable, WalkType, WalkableValue, ScalarValue};
 //!
 //! struct Person {
 //!     name: String,
@@ -282,7 +282,8 @@ pub trait Walkable {
     /// once for each (key, value) pair.
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
+    /// // In your Walkable impl:
     /// fn walk_map_visitor(&self, visitor: &mut dyn FnMut(&str, WalkableRef<'_>)) {
     ///     visitor("name", WalkableRef::string(&self.name));
     ///     visitor("age", WalkableRef::int(self.age as i64));

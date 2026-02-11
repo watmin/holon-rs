@@ -12,8 +12,8 @@
 //! let holon = Holon::new(4096);
 //!
 //! // Encode structured data
-//! let billing = holon.encode_json(r#"{"type": "billing", "amount": 100}"#)?;
-//! let technical = holon.encode_json(r#"{"type": "technical"}"#)?;
+//! let billing = holon.encode_json(r#"{"type": "billing", "amount": 100}"#).unwrap();
+//! let technical = holon.encode_json(r#"{"type": "technical"}"#).unwrap();
 //!
 //! // Compute similarity
 //! let sim = holon.similarity(&billing, &technical);
@@ -69,7 +69,7 @@ pub use walkable::{ScalarRef, ScalarValue, WalkType, Walkable, WalkableRef, Walk
 /// let holon = Holon::new(4096);
 ///
 /// // Encode data
-/// let vec = holon.encode_json(r#"{"type": "billing"}"#)?;
+/// let vec = holon.encode_json(r#"{"type": "billing"}"#).unwrap();
 ///
 /// // Create accumulator for streaming
 /// let mut accum = holon.create_accumulator();
@@ -95,6 +95,7 @@ impl Holon {
     ///
     /// # Example
     /// ```rust
+    /// use holon::Holon;
     /// let holon = Holon::new(4096);
     /// ```
     pub fn new(dimensions: usize) -> Self {
@@ -140,7 +141,9 @@ impl Holon {
     ///
     /// # Example
     /// ```rust
-    /// let vec = holon.encode_json(r#"{"type": "billing", "amount": 100}"#)?;
+    /// use holon::Holon;
+    /// let holon = Holon::new(4096);
+    /// let vec = holon.encode_json(r#"{"type": "billing", "amount": 100}"#).unwrap();
     /// ```
     pub fn encode_json(&self, json: &str) -> Result<Vector> {
         self.encoder.encode_json(json)
@@ -169,6 +172,8 @@ impl Holon {
     ///
     /// # Example
     /// ```rust
+    /// use holon::{Holon, ScalarMode};
+    /// let holon = Holon::new(4096);
     /// // Linear encoding - nearby values are similar
     /// let v100 = holon.encode_scalar(100.0, ScalarMode::Linear { scale: 10000.0 });
     /// let v110 = holon.encode_scalar(110.0, ScalarMode::Linear { scale: 10000.0 });
@@ -200,6 +205,8 @@ impl Holon {
     ///
     /// # Example
     /// ```rust
+    /// use holon::{Holon, SequenceMode};
+    /// let holon = Holon::new(4096);
     /// // Order-preserving
     /// let seq = holon.encode_sequence(&["A", "B", "C"], SequenceMode::Positional);
     ///
@@ -287,6 +294,11 @@ impl Holon {
     ///
     /// # Example
     /// ```rust
+    /// use holon::Holon;
+    /// let holon = Holon::new(4096);
+    /// let a = holon.get_vector("a");
+    /// let b = holon.get_vector("b");
+    /// let c = holon.get_vector("c");
     /// let abc = holon.bundle(&[&a, &b, &c]);
     /// let ac = holon.negate(&abc, &b);
     /// // similarity(ac, b) < 0 (negative similarity)
