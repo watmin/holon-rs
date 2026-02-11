@@ -46,7 +46,7 @@ pub mod walkable;
 pub use accumulator::Accumulator;
 pub use encoder::{Encoder, SequenceMode};
 pub use error::{HolonError, Result};
-pub use primitives::{NegateMethod, Primitives};
+pub use primitives::{AttendMode, GateMode, NegateMethod, Primitives, SegmentMethod};
 pub use scalar::{ScalarEncoder, ScalarMode};
 pub use similarity::{Metric, Similarity};
 pub use vector::Vector;
@@ -391,6 +391,70 @@ impl Holon {
     /// Compute similarity with a specific metric.
     pub fn similarity_with_metric(&self, a: &Vector, b: &Vector, metric: Metric) -> f64 {
         Similarity::compute(a, b, metric)
+    }
+
+    // =========================================================================
+    // Extended Algebra
+    // =========================================================================
+
+    /// Return similarity as a VECTOR, not a scalar.
+    ///
+    /// Preserves dimension-wise agreement pattern.
+    pub fn similarity_profile(&self, a: &Vector, b: &Vector) -> Vector {
+        Primitives::similarity_profile(a, b)
+    }
+
+    /// Weighted resonance - soft attention in VSA algebra.
+    pub fn attend(&self, query: &Vector, memory: &Vector, strength: f64, mode: AttendMode) -> Vector {
+        Primitives::attend(query, memory, strength, mode)
+    }
+
+    /// Relational transfer: A is to B as C is to ?
+    pub fn analogy(&self, a: &Vector, b: &Vector, c: &Vector) -> Vector {
+        Primitives::analogy(a, b, c)
+    }
+
+    /// Project vector onto subspace defined by exemplars.
+    pub fn project(&self, vec: &Vector, subspace: &[&Vector], orthogonalize: bool) -> Vector {
+        Primitives::project(vec, subspace, orthogonalize)
+    }
+
+    /// Bind only where condition is met (gated binding).
+    pub fn conditional_bind(
+        &self,
+        a: &Vector,
+        b: &Vector,
+        gate: &Vector,
+        mode: GateMode,
+    ) -> Vector {
+        Primitives::conditional_bind(a, b, gate, mode)
+    }
+
+    /// Measure the "complexity" or "mixedness" of a vector.
+    pub fn complexity(&self, vec: &Vector) -> f64 {
+        Primitives::complexity(vec)
+    }
+
+    /// Reconstruct components from a vector using a codebook.
+    pub fn invert(
+        &self,
+        vec: &Vector,
+        codebook: &[Vector],
+        top_k: usize,
+        threshold: f64,
+    ) -> Vec<(usize, f64)> {
+        Primitives::invert(vec, codebook, top_k, threshold)
+    }
+
+    /// Find structural breakpoints in a vector stream.
+    pub fn segment(
+        &self,
+        stream: &[Vector],
+        window: usize,
+        threshold: f64,
+        method: SegmentMethod,
+    ) -> Vec<usize> {
+        Primitives::segment(stream, window, threshold, method)
     }
 }
 
