@@ -531,6 +531,68 @@ impl Holon {
         Primitives::cross_correlate(stream_a, stream_b, max_lag)
     }
 
+    // =========================================================================
+    // Advanced Operations
+    // =========================================================================
+
+    /// Orthogonal complement of project: everything NOT explained by the subspace.
+    ///
+    /// While `project` extracts what's IN the subspace,
+    /// `reject` extracts what's OUTSIDE it — the residual signal.
+    pub fn reject(&self, vec: &Vector, subspace: &[&Vector], orthogonalize: bool) -> Vector {
+        Primitives::reject(vec, subspace, orthogonalize)
+    }
+
+    /// Bundle vectors and return per-dimension agreement margins.
+    ///
+    /// Returns `(bundled_vector, confidence_margins)`.
+    pub fn bundle_with_confidence(&self, vectors: &[&Vector]) -> (Vector, Vec<f64>) {
+        Primitives::bundle_with_confidence(vectors)
+    }
+
+    /// Mean pairwise cosine similarity (cluster tightness).
+    ///
+    /// 1.0 = identical, 0.0 = orthogonal, negative = anti-correlated.
+    pub fn coherence(&self, vectors: &[Vector]) -> f64 {
+        Primitives::coherence(vectors)
+    }
+
+    /// Grover's diffusion operator: reflect vector about its mean value.
+    pub fn reflect_about_mean(&self, vec: &Vector) -> Vector {
+        Primitives::reflect_about_mean(vec)
+    }
+
+    /// Quantum-inspired iterative amplitude amplification.
+    ///
+    /// Amplifies a weak signal buried in a strong background.
+    pub fn grover_amplify(&self, signal: &Vector, background: &Vector, iterations: usize) -> Vector {
+        Primitives::grover_amplify(signal, background, iterations)
+    }
+
+    /// Temporal derivative of similarity in a vector stream.
+    ///
+    /// Returns drift rates (positive = converging, negative = diverging).
+    pub fn drift_rate(&self, stream: &[Vector], window: usize) -> Vec<f64> {
+        Primitives::drift_rate(stream, window)
+    }
+
+    /// Convert cosine similarity to statistical significance (z-score).
+    pub fn significance(&self, similarity: f64) -> f64 {
+        Similarity::significance(similarity, self.dimensions)
+    }
+
+    /// Decode a scalar value from a log-scale encoded vector.
+    ///
+    /// Inverse of `encode_scalar_log`. Uses grid search with refinement.
+    pub fn decode_scalar_log(&self, vec: &Vector) -> f64 {
+        self.scalar_encoder.decode_log(vec, 1e-2, 1e10, 500, 200)
+    }
+
+    /// Decode a scalar value from a log-scale encoded vector with custom range.
+    pub fn decode_scalar_log_range(&self, vec: &Vector, lo: f64, hi: f64) -> f64 {
+        self.scalar_encoder.decode_log(vec, lo, hi, 500, 200)
+    }
+
     /// Estimate how close an accumulator is to saturation.
     ///
     /// Returns remaining capacity as a fraction in [0.0, 1.0].

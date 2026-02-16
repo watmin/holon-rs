@@ -208,6 +208,75 @@ impl ScalarEncoder {
         self.encode_linear(log_value, 10.0)
     }
 
+    /// Decode a scalar value from a log-scale encoded vector.
+    ///
+    /// The inverse of `encode_log`: recovers the original scalar value
+    /// by grid search over the log10 range, then refinement around the best
+    /// candidate.
+    ///
+    /// Uses agreement count (matching signs) to avoid norm bias from zero
+    /// dimensions that positional encoding produces.
+    ///
+    /// # Arguments
+    /// * `vec` - The encoded vector to decode
+    /// * `lo` - Lower bound of search range (must be > 0)
+    /// * `hi` - Upper bound of search range
+    /// * `num_probes` - Grid resolution for coarse search
+    /// * `refine_steps` - Resolution for refinement
+    pub fn decode_log(
+        &self,
+        vec: &Vector,
+        lo: f64,
+        hi: f64,
+        num_probes: usize,
+        refine_steps: usize,
+    ) -> f64 {
+        let log_lo = lo.max(1e-10).log10();
+        let log_hi = hi.log10();
+        let target = vec.data();
+
+        let score = |log_val: f64| -> i32 {
+            let candidate = self.encode_log_base(10.0_f64.powf(log_val), 10.0);
+            let cdata = candidate.data();
+            target
+                .iter()
+                .zip(cdata.iter())
+                .filter(|(&t, &c)| t != 0 && c != 0 && t == c)
+                .count() as i32
+        };
+
+        // Coarse grid search
+        let mut best_log = log_lo;
+        let mut best_score = -1;
+
+        for i in 0..num_probes {
+            let frac = i as f64 / (num_probes - 1) as f64;
+            let log_val = log_lo + frac * (log_hi - log_lo);
+            let s = score(log_val);
+            if s > best_score {
+                best_score = s;
+                best_log = log_val;
+            }
+        }
+
+        // Refine around best candidate
+        let step = (log_hi - log_lo) / num_probes as f64;
+        let ref_lo = best_log - step;
+        let ref_hi = best_log + step;
+
+        for i in 0..refine_steps {
+            let frac = i as f64 / (refine_steps - 1) as f64;
+            let log_val = ref_lo + frac * (ref_hi - ref_lo);
+            let s = score(log_val);
+            if s > best_score {
+                best_score = s;
+                best_log = log_val;
+            }
+        }
+
+        10.0_f64.powf(best_log)
+    }
+
     /// Encode with a custom seed (for different "dimensions" of scalars).
     ///
     /// Use this when you need to encode multiple different scalar types

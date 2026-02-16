@@ -977,6 +977,235 @@ impl Primitives {
 
         breakpoints
     }
+
+    // =========================================================================
+    // Advanced Operations
+    // =========================================================================
+
+    /// Orthogonal complement of project: everything NOT explained by the subspace.
+    ///
+    /// While `project(vec, basis)` extracts what's IN the subspace,
+    /// `reject(vec, basis)` extracts what's OUTSIDE it — the residual signal.
+    pub fn reject(vec: &Vector, subspace: &[&Vector], orthogonalize: bool) -> Vector {
+        if subspace.is_empty() {
+            return vec.clone();
+        }
+
+        let v: Vec<f64> = vec.data().iter().map(|&x| x as f64).collect();
+        let mut basis: Vec<Vec<f64>> = subspace
+            .iter()
+            .map(|u| u.data().iter().map(|&x| x as f64).collect())
+            .collect();
+
+        // Gram-Schmidt orthogonalization
+        if orthogonalize && basis.len() > 1 {
+            let mut ortho_basis: Vec<Vec<f64>> = Vec::new();
+            for u in basis.iter() {
+                let mut u_new = u.clone();
+                for prev in ortho_basis.iter() {
+                    let prev_norm_sq: f64 = prev.iter().map(|&x| x * x).sum();
+                    if prev_norm_sq > 1e-10 {
+                        let dot: f64 =
+                            u_new.iter().zip(prev.iter()).map(|(&a, &b)| a * b).sum();
+                        let coeff = dot / prev_norm_sq;
+                        for (i, p) in prev.iter().enumerate() {
+                            u_new[i] -= coeff * p;
+                        }
+                    }
+                }
+                let norm: f64 = u_new.iter().map(|&x| x * x).sum::<f64>().sqrt();
+                if norm > 1e-10 {
+                    ortho_basis.push(u_new);
+                }
+            }
+            basis = ortho_basis;
+        }
+
+        // Compute projection
+        let mut projection = vec![0.0; vec.dimensions()];
+        for u in basis.iter() {
+            let norm_sq: f64 = u.iter().map(|&x| x * x).sum();
+            if norm_sq > 1e-10 {
+                let dot: f64 = v.iter().zip(u.iter()).map(|(&a, &b)| a * b).sum();
+                let coeff = dot / norm_sq;
+                for (i, &ui) in u.iter().enumerate() {
+                    projection[i] += coeff * ui;
+                }
+            }
+        }
+
+        // Residual = original - projection, then threshold
+        let data: Vec<i8> = v
+            .iter()
+            .zip(projection.iter())
+            .map(|(&vi, &pi)| {
+                let r = vi - pi;
+                if r > 0.0 {
+                    1
+                } else if r < 0.0 {
+                    -1
+                } else {
+                    0
+                }
+            })
+            .collect();
+
+        Vector::from_data(data)
+    }
+
+    /// Bundle vectors and return per-dimension agreement margins.
+    ///
+    /// Returns `(bundled_vector, confidence_margins)` where margins are
+    /// `abs(sum) / n` per dimension (0.0 = tie, 1.0 = unanimous).
+    pub fn bundle_with_confidence(vectors: &[&Vector]) -> (Vector, Vec<f64>) {
+        assert!(!vectors.is_empty(), "Cannot bundle empty vector list");
+
+        let n = vectors.len() as f64;
+        let dimensions = vectors[0].dimensions();
+        let mut sums = vec![0i32; dimensions];
+
+        for vec in vectors {
+            for (i, &v) in vec.data().iter().enumerate() {
+                sums[i] += v as i32;
+            }
+        }
+
+        let bundled: Vec<i8> = sums
+            .iter()
+            .map(|&s| {
+                if s > 0 {
+                    1
+                } else if s < 0 {
+                    -1
+                } else {
+                    0
+                }
+            })
+            .collect();
+
+        let margins: Vec<f64> = sums.iter().map(|&s| (s as f64).abs() / n).collect();
+
+        (Vector::from_data(bundled), margins)
+    }
+
+    /// Mean pairwise cosine similarity of a set of vectors.
+    ///
+    /// Measures cluster tightness / concentration:
+    /// - 1.0 = all vectors identical
+    /// - 0.0 = vectors are random / orthogonal
+    pub fn coherence(vectors: &[Vector]) -> f64 {
+        let n = vectors.len();
+        if n < 2 {
+            return 1.0;
+        }
+
+        let mut total = 0.0;
+        let mut count = 0;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                total += crate::similarity::Similarity::cosine(&vectors[i], &vectors[j]);
+                count += 1;
+            }
+        }
+
+        total / count as f64
+    }
+
+    /// Grover's diffusion operator: reflect vector about its mean value.
+    pub fn reflect_about_mean(vec: &Vector) -> Vector {
+        let v: Vec<f64> = vec.data().iter().map(|&x| x as f64).collect();
+        let mean: f64 = v.iter().sum::<f64>() / v.len() as f64;
+        let data: Vec<i8> = v
+            .iter()
+            .map(|&x| {
+                let r = 2.0 * mean - x;
+                if r > 0.0 {
+                    1
+                } else if r < 0.0 {
+                    -1
+                } else {
+                    0
+                }
+            })
+            .collect();
+        Vector::from_data(data)
+    }
+
+    /// Quantum-inspired iterative amplitude amplification.
+    ///
+    /// Amplifies a weak signal buried in a strong background by iteratively:
+    /// 1. Attend to the signal (mark the target)
+    /// 2. Reflect about the background mean (diffusion)
+    pub fn grover_amplify(signal: &Vector, background: &Vector, iterations: usize) -> Vector {
+        let s: Vec<f64> = signal.data().iter().map(|&x| x as f64).collect();
+        let mut v: Vec<f64> = background.data().iter().map(|&x| x as f64).collect();
+
+        for _ in 0..iterations {
+            // Mark: boost dimensions agreeing with signal
+            for i in 0..v.len() {
+                let agreement = s[i] * v[i];
+                let weight = (1.0 + agreement.tanh()) / 2.0;
+                v[i] *= weight;
+            }
+
+            // Diffuse: reflect about mean
+            let mean: f64 = v.iter().sum::<f64>() / v.len() as f64;
+            for x in v.iter_mut() {
+                *x = 2.0 * mean - *x;
+            }
+        }
+
+        let data: Vec<i8> = v
+            .iter()
+            .map(|&x| {
+                if x > 0.0 {
+                    1
+                } else if x < 0.0 {
+                    -1
+                } else {
+                    0
+                }
+            })
+            .collect();
+        Vector::from_data(data)
+    }
+
+    /// Temporal derivative of similarity: how fast is the signal changing?
+    ///
+    /// Returns a list of drift rates. Length = `stream.len() - 2`.
+    pub fn drift_rate(stream: &[Vector], window: usize) -> Vec<f64> {
+        if stream.len() < 3 {
+            return vec![];
+        }
+
+        // Compute consecutive similarities
+        let mut sims = Vec::with_capacity(stream.len() - 1);
+        for i in 1..stream.len() {
+            if window > 1 && i >= window {
+                let start = if i >= window { i - window + 1 } else { 1 };
+                let mut w_sum = 0.0;
+                let mut w_count = 0;
+                for j in start..=i {
+                    w_sum += crate::similarity::Similarity::cosine(&stream[j], &stream[j - 1]);
+                    w_count += 1;
+                }
+                sims.push(w_sum / w_count as f64);
+            } else {
+                sims.push(crate::similarity::Similarity::cosine(
+                    &stream[i],
+                    &stream[i - 1],
+                ));
+            }
+        }
+
+        // Compute derivative
+        let mut rates = Vec::with_capacity(sims.len() - 1);
+        for i in 1..sims.len() {
+            rates.push(sims[i] - sims[i - 1]);
+        }
+
+        rates
+    }
 }
 
 /// Mode for attention operation.
@@ -1452,5 +1681,139 @@ mod tests {
         let stream: Vec<Vector> = (0..20).map(|i| make_bipolar(64, i)).collect();
         let xcf = Primitives::cross_correlate(&stream, &stream, 5);
         assert!(xcf[0] > 0.9);
+    }
+
+    // =========================================================================
+    // Advanced Operations Tests
+    // =========================================================================
+
+    #[test]
+    fn test_reject_removes_component() {
+        let a = make_bipolar(4096, 0);
+        let b = make_bipolar(4096, 1);
+        let combined = Primitives::bundle(&[&a, &b]);
+
+        let rejected = Primitives::reject(&combined, &[&a], true);
+
+        let sim_orig = crate::similarity::Similarity::cosine(&combined, &a).abs();
+        let sim_reject = crate::similarity::Similarity::cosine(&rejected, &a).abs();
+        assert!(sim_reject < sim_orig, "reject should reduce similarity to basis");
+    }
+
+    #[test]
+    fn test_reject_empty_returns_original() {
+        let v = make_bipolar(64, 0);
+        let result = Primitives::reject(&v, &[], true);
+        assert_eq!(v, result);
+    }
+
+    #[test]
+    fn test_reject_self_near_zero() {
+        let v = make_bipolar(4096, 0);
+        let result = Primitives::reject(&v, &[&v], true);
+        let nnz = result.data().iter().filter(|&&x| x != 0).count();
+        assert!(nnz < v.dimensions() / 10, "rejecting self should yield near-zero");
+    }
+
+    #[test]
+    fn test_bundle_with_confidence_matches_bundle() {
+        let vecs: Vec<Vector> = (0..5).map(|i| make_bipolar(256, i)).collect();
+        let refs: Vec<&Vector> = vecs.iter().collect();
+
+        let regular = Primitives::bundle(&refs);
+        let (bundled, margins) = Primitives::bundle_with_confidence(&refs);
+
+        assert_eq!(regular, bundled);
+        assert_eq!(margins.len(), 256);
+        assert!(margins.iter().all(|&m| m >= 0.0 && m <= 1.0));
+    }
+
+    #[test]
+    fn test_bundle_with_confidence_unanimous() {
+        let v = make_bipolar(128, 0);
+        let vecs = vec![v.clone(); 10];
+        let refs: Vec<&Vector> = vecs.iter().collect();
+
+        let (_, margins) = Primitives::bundle_with_confidence(&refs);
+        assert!(margins.iter().all(|&m| (m - 1.0).abs() < 1e-10), "unanimous should give margins = 1.0");
+    }
+
+    #[test]
+    fn test_coherence_identical() {
+        let v = make_bipolar(256, 0);
+        let vecs = vec![v.clone(), v.clone(), v.clone()];
+        assert!(Primitives::coherence(&vecs) > 0.99);
+    }
+
+    #[test]
+    fn test_coherence_random_near_zero() {
+        let vecs: Vec<Vector> = (0..10).map(|i| make_bipolar(4096, i)).collect();
+        let c = Primitives::coherence(&vecs);
+        assert!(c.abs() < 0.15, "random vectors should have ~0 coherence, got {}", c);
+    }
+
+    #[test]
+    fn test_coherence_single() {
+        let v = make_bipolar(64, 0);
+        assert_eq!(Primitives::coherence(&[v]), 1.0);
+    }
+
+    #[test]
+    fn test_reflect_about_mean_balanced() {
+        let v = Vector::from_data(vec![1, 1, -1, -1]);
+        let r = Primitives::reflect_about_mean(&v);
+        // mean=0, so 2*0 - v = -v
+        assert_eq!(r, Vector::from_data(vec![-1, -1, 1, 1]));
+    }
+
+    #[test]
+    fn test_grover_amplify_output_bipolar() {
+        let signal = make_bipolar(256, 0);
+        let bg = make_bipolar(256, 1);
+        let result = Primitives::grover_amplify(&signal, &bg, 2);
+        assert!(result.data().iter().all(|&v| v == -1 || v == 0 || v == 1));
+    }
+
+    #[test]
+    fn test_grover_amplify_zero_iterations() {
+        let signal = make_bipolar(64, 0);
+        let bg = make_bipolar(64, 1);
+        let result = Primitives::grover_amplify(&signal, &bg, 0);
+        // Zero iterations = threshold background
+        assert_eq!(result.dimensions(), bg.dimensions());
+    }
+
+    #[test]
+    fn test_drift_rate_stable() {
+        let v = make_bipolar(256, 0);
+        let stream = vec![v.clone(); 10];
+        let rates = Primitives::drift_rate(&stream, 1);
+        assert!(rates.iter().all(|&r| r.abs() < 0.01), "stable stream should have ~0 drift");
+    }
+
+    #[test]
+    fn test_drift_rate_sudden_change() {
+        let a = make_bipolar(4096, 0);
+        let b = make_bipolar(4096, 1);
+        let mut stream: Vec<Vector> = vec![a.clone(); 5];
+        stream.extend(vec![b.clone(); 5]);
+
+        let rates = Primitives::drift_rate(&stream, 1);
+        let min_rate = rates.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(min_rate < -0.5, "sudden change should produce negative spike");
+    }
+
+    #[test]
+    fn test_drift_rate_short_stream() {
+        let v = make_bipolar(64, 0);
+        assert!(Primitives::drift_rate(&[v.clone()], 1).is_empty());
+        assert!(Primitives::drift_rate(&[v.clone(), v.clone()], 1).is_empty());
+    }
+
+    #[test]
+    fn test_drift_rate_length() {
+        let stream: Vec<Vector> = (0..10).map(|i| make_bipolar(64, i)).collect();
+        let rates = Primitives::drift_rate(&stream, 1);
+        assert_eq!(rates.len(), stream.len() - 2);
     }
 }

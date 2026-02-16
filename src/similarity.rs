@@ -367,6 +367,22 @@ impl Similarity {
         let dist = Self::weighted_euclidean_distance(a, b, weights);
         1.0 / (1.0 + dist)
     }
+
+    /// Convert cosine similarity to statistical significance (z-score).
+    ///
+    /// In high dimensions, random bipolar vectors are nearly orthogonal
+    /// with cosine similarity ≈ N(0, 1/√d). This converts a raw similarity
+    /// into a z-score.
+    ///
+    /// - |z| > 2.0: likely meaningful (p < 0.05)
+    /// - |z| > 3.0: very significant (p < 0.003)
+    /// - |z| > 5.0: essentially certain
+    pub fn significance(similarity: f64, dimensions: usize) -> f64 {
+        if dimensions == 0 {
+            return 0.0;
+        }
+        similarity * (dimensions as f64).sqrt()
+    }
 }
 
 #[cfg(test)]
@@ -538,5 +554,28 @@ mod tests {
         let direct = Similarity::chebyshev(&a, &b);
         let via_compute = Similarity::compute(&a, &b, Metric::Chebyshev);
         assert!((direct - via_compute).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_significance_zero() {
+        assert_eq!(Similarity::significance(0.0, 4096), 0.0);
+    }
+
+    #[test]
+    fn test_significance_known_value() {
+        let z = Similarity::significance(0.05, 4096);
+        assert!((z - 3.2).abs() < 0.01, "0.05 * sqrt(4096) = 3.2, got {}", z);
+    }
+
+    #[test]
+    fn test_significance_scales() {
+        let z_small = Similarity::significance(0.1, 64);
+        let z_large = Similarity::significance(0.1, 4096);
+        assert!(z_large > z_small);
+    }
+
+    #[test]
+    fn test_significance_zero_dims() {
+        assert_eq!(Similarity::significance(0.5, 0), 0.0);
     }
 }
