@@ -176,6 +176,68 @@ impl Accumulator {
             *v *= factor;
         }
     }
+
+    /// Estimate how close the accumulator is to saturation.
+    ///
+    /// Based on the capacity bound: N ≤ d / (2 * ln(k)) for d-dimensional
+    /// vectors with k codebook items. Returns remaining capacity as a
+    /// fraction in [0.0, 1.0].
+    ///
+    /// - 1.0 = completely empty
+    /// - 0.0 = fully saturated
+    pub fn capacity(&self, codebook_size: usize) -> f64 {
+        let d = self.dimensions() as f64;
+        if codebook_size < 2 {
+            return 1.0;
+        }
+
+        let max_items = d / (2.0 * (codebook_size as f64).ln());
+
+        let l2_sq: f64 = self.sums.iter().map(|&x| x * x).sum();
+        let estimated_items = l2_sq / d;
+
+        (1.0 - estimated_items / max_items).max(0.0).min(1.0)
+    }
+
+    /// Quantum-inspired purity measure: how concentrated is the accumulator?
+    ///
+    /// For a single bipolar vector: purity ≈ 1.0.
+    /// For N dissimilar vectors accumulated: purity ≈ 1/N.
+    ///
+    /// Analogous to Tr(ρ²) from quantum mechanics.
+    pub fn purity(&self) -> f64 {
+        let d = self.dimensions() as f64;
+        if d == 0.0 {
+            return 0.0;
+        }
+
+        let l2_sq: f64 = self.sums.iter().map(|&x| x * x).sum();
+        if l2_sq < 1e-10 {
+            return 0.0;
+        }
+
+        (d / l2_sq).min(1.0)
+    }
+
+    /// Participation ratio: effective number of active dimensions.
+    ///
+    /// PR = (sum v_i²)² / sum(v_i⁴)
+    ///
+    /// For a single bipolar vector of dimension d: PR = d.
+    /// As structure concentrates into fewer dimensions, PR decreases.
+    pub fn participation_ratio(&self) -> f64 {
+        let l2_sq: f64 = self.sums.iter().map(|&x| x * x).sum();
+        if l2_sq < 1e-10 {
+            return 0.0;
+        }
+
+        let l4_sum: f64 = self.sums.iter().map(|&x| x * x * x * x).sum();
+        if l4_sum < 1e-10 {
+            return 0.0;
+        }
+
+        (l2_sq * l2_sq) / l4_sum
+    }
 }
 
 #[cfg(test)]
@@ -249,5 +311,88 @@ mod tests {
 
         // After decay: [1, -1, 1, -1]
         assert_eq!(acc.raw_sums(), &[1.0, -1.0, 1.0, -1.0]);
+    }
+
+    // =========================================================================
+    // Capacity, Purity, Participation Ratio Tests
+    // =========================================================================
+
+    fn make_bipolar(n: usize, seed: u64) -> Vector {
+        use rand::prelude::*;
+        use rand_chacha::ChaCha8Rng;
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let data: Vec<i8> = (0..n)
+            .map(|_| if rng.gen_bool(0.5) { 1 } else { -1 })
+            .collect();
+        Vector::from_data(data)
+    }
+
+    #[test]
+    fn test_capacity_empty() {
+        let acc = Accumulator::new(1024);
+        assert_eq!(acc.capacity(100), 1.0);
+    }
+
+    #[test]
+    fn test_capacity_decreases() {
+        let mut acc = Accumulator::new(1024);
+        let first_cap;
+        acc.add(&make_bipolar(1024, 0));
+        first_cap = acc.capacity(100);
+
+        for i in 1..50 {
+            acc.add(&make_bipolar(1024, i));
+        }
+        let last_cap = acc.capacity(100);
+        assert!(last_cap < first_cap);
+    }
+
+    #[test]
+    fn test_purity_single_vector() {
+        let mut acc = Accumulator::new(1024);
+        acc.add(&make_bipolar(1024, 0));
+        let p = acc.purity();
+        assert!(p > 0.95, "Single vector purity should be ~1.0: {}", p);
+    }
+
+    #[test]
+    fn test_purity_many_random() {
+        let mut acc = Accumulator::new(1024);
+        for i in 0..50 {
+            acc.add(&make_bipolar(1024, i));
+        }
+        let p = acc.purity();
+        assert!(p < 0.5, "50 random vectors should have low purity: {}", p);
+    }
+
+    #[test]
+    fn test_purity_empty() {
+        let acc = Accumulator::new(1024);
+        assert_eq!(acc.purity(), 0.0);
+    }
+
+    #[test]
+    fn test_participation_ratio_single() {
+        let mut acc = Accumulator::new(1024);
+        acc.add(&make_bipolar(1024, 0));
+        let pr = acc.participation_ratio();
+        assert!(pr > 900.0, "Single bipolar should have high PR: {}", pr);
+    }
+
+    #[test]
+    fn test_participation_ratio_empty() {
+        let acc = Accumulator::new(1024);
+        assert_eq!(acc.participation_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_participation_ratio_concentrated() {
+        let mut acc = Accumulator::new(1024);
+        // Manually set: energy in only 10 dims
+        for i in 0..10 {
+            acc.sums[i] = 100.0;
+        }
+        let pr = acc.participation_ratio();
+        assert!(pr < 20.0, "Concentrated should have low PR: {}", pr);
     }
 }

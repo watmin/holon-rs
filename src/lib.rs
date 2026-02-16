@@ -466,6 +466,91 @@ impl Holon {
     }
 
     // =========================================================================
+    // Vector Operations
+    // =========================================================================
+
+    /// Keep only the k dimensions with the largest absolute values.
+    ///
+    /// Zeroes out all other dimensions for noise resistance.
+    pub fn sparsify(&self, vec: &Vector, k: usize) -> Vector {
+        Primitives::sparsify(vec, k)
+    }
+
+    /// Compute the true geometric average (centroid) of vectors.
+    pub fn centroid(&self, vectors: &[&Vector]) -> Vector {
+        Primitives::centroid(vectors)
+    }
+
+    /// Negate every element: +1 → -1, -1 → +1, 0 → 0.
+    pub fn flip(&self, vec: &Vector) -> Vector {
+        Primitives::flip(vec)
+    }
+
+    /// Find the k most similar vectors to a query from candidates.
+    ///
+    /// Returns (index, similarity) tuples sorted by similarity descending.
+    pub fn topk_similar(&self, query: &Vector, candidates: &[Vector], k: usize) -> Vec<(usize, f64)> {
+        Primitives::topk_similar(query, candidates, k)
+    }
+
+    /// Compute all pairwise similarities for a set of vectors.
+    ///
+    /// Returns a flattened n×n matrix (row-major).
+    pub fn similarity_matrix(&self, vectors: &[Vector]) -> Vec<f64> {
+        Primitives::similarity_matrix(vectors)
+    }
+
+    /// Information-theoretic entropy of the vector's element distribution.
+    ///
+    /// Normalized to [0, 1].
+    pub fn entropy(&self, vec: &Vector) -> f64 {
+        Primitives::entropy(vec)
+    }
+
+    /// Reduce dimensionality via random projection (Johnson-Lindenstrauss).
+    pub fn random_project(&self, vec: &Vector, target_dims: usize, seed: u64) -> Vector {
+        Primitives::random_project(vec, target_dims, seed)
+    }
+
+    /// Fractional binding: raise a vector to a real-valued power.
+    pub fn power(&self, vec: &Vector, exponent: f64) -> Vector {
+        Primitives::power(vec, exponent)
+    }
+
+    /// Compute similarity of a vector stream with itself at different lags.
+    ///
+    /// Peaks at lag k indicate period-k patterns.
+    pub fn autocorrelate(&self, stream: &[Vector], max_lag: usize) -> Vec<f64> {
+        Primitives::autocorrelate(stream, max_lag)
+    }
+
+    /// Compute similarity between two vector streams at different offsets.
+    ///
+    /// Detects causal relationships between streams.
+    pub fn cross_correlate(&self, stream_a: &[Vector], stream_b: &[Vector], max_lag: usize) -> Vec<f64> {
+        Primitives::cross_correlate(stream_a, stream_b, max_lag)
+    }
+
+    /// Estimate how close an accumulator is to saturation.
+    ///
+    /// Returns remaining capacity as a fraction in [0.0, 1.0].
+    pub fn accumulator_capacity(&self, accumulator: &Accumulator, codebook_size: usize) -> f64 {
+        accumulator.capacity(codebook_size)
+    }
+
+    /// Quantum-inspired purity measure for an accumulator.
+    ///
+    /// High purity = single concept; low purity = diffuse superposition.
+    pub fn accumulator_purity(&self, accumulator: &Accumulator) -> f64 {
+        accumulator.purity()
+    }
+
+    /// Participation ratio: effective number of active dimensions.
+    pub fn accumulator_participation_ratio(&self, accumulator: &Accumulator) -> f64 {
+        accumulator.participation_ratio()
+    }
+
+    // =========================================================================
     // Extended Algebra
     // =========================================================================
 

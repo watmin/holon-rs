@@ -659,6 +659,285 @@ impl Primitives {
         results
     }
 
+    // =========================================================================
+    // Vector Operations
+    // =========================================================================
+
+    /// Keep only the k dimensions with the largest absolute values.
+    ///
+    /// Zeroes out all other dimensions. Improves noise resistance and
+    /// reduces interference in bundling. For bipolar vectors where all
+    /// absolute values are equal, exactly k dimensions are kept.
+    pub fn sparsify(vec: &Vector, k: usize) -> Vector {
+        let d = vec.dimensions();
+        if k >= d {
+            return vec.clone();
+        }
+
+        let abs_vals: Vec<(usize, u8)> = vec
+            .data()
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (i, v.unsigned_abs()))
+            .collect();
+
+        // Find the top-k indices by absolute value
+        let mut indexed = abs_vals;
+        indexed.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+        let mut data = vec![0i8; d];
+        for &(idx, _) in indexed.iter().take(k) {
+            data[idx] = vec.data()[idx];
+        }
+
+        Vector::from_data(data)
+    }
+
+    /// Compute the true geometric average (centroid) of vectors.
+    ///
+    /// Unlike bundle (majority vote) or prototype (thresholded majority),
+    /// centroid normalizes the sum before thresholding, preserving the
+    /// direction of the mean.
+    pub fn centroid(vectors: &[&Vector]) -> Vector {
+        if vectors.is_empty() {
+            panic!("Cannot compute centroid of empty vector list");
+        }
+
+        let d = vectors[0].dimensions();
+        let mut sums = vec![0.0f64; d];
+
+        for vec in vectors {
+            for (i, &v) in vec.data().iter().enumerate() {
+                sums[i] += v as f64;
+            }
+        }
+
+        let norm: f64 = sums.iter().map(|&x| x * x).sum::<f64>().sqrt();
+        if norm < 1e-10 {
+            return Vector::zeros(d);
+        }
+
+        let data: Vec<i8> = sums
+            .iter()
+            .map(|&v| {
+                let normalized = v / norm;
+                if normalized > 0.0 {
+                    1
+                } else if normalized < 0.0 {
+                    -1
+                } else {
+                    0
+                }
+            })
+            .collect();
+
+        Vector::from_data(data)
+    }
+
+    /// Negate every element: +1 → -1, -1 → +1, 0 → 0.
+    ///
+    /// The logical NOT of a vector — the "opposite" of a concept.
+    /// `similarity(vec, flip(vec)) ≈ -1.0`
+    pub fn flip(vec: &Vector) -> Vector {
+        let data: Vec<i8> = vec.data().iter().map(|&v| -v).collect();
+        Vector::from_data(data)
+    }
+
+    /// Find the k most similar vectors to a query from candidates.
+    ///
+    /// Returns (index, similarity) tuples sorted by similarity descending.
+    /// Generalization of cleanup (top-1) for retrieval and classification.
+    pub fn topk_similar(query: &Vector, candidates: &[Vector], k: usize) -> Vec<(usize, f64)> {
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        let mut scores: Vec<(usize, f64)> = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, cand)| (i, crate::similarity::Similarity::cosine(query, cand)))
+            .collect();
+
+        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scores.truncate(k);
+        scores
+    }
+
+    /// Compute all pairwise similarities for a set of vectors.
+    ///
+    /// Returns a flattened n×n matrix (row-major) where `matrix[i*n + j]`
+    /// is the cosine similarity between `vectors[i]` and `vectors[j]`.
+    pub fn similarity_matrix(vectors: &[Vector]) -> Vec<f64> {
+        let n = vectors.len();
+        let mut matrix = vec![0.0f64; n * n];
+
+        for i in 0..n {
+            matrix[i * n + i] = 1.0;
+            for j in (i + 1)..n {
+                let sim = crate::similarity::Similarity::cosine(&vectors[i], &vectors[j]);
+                matrix[i * n + j] = sim;
+                matrix[j * n + i] = sim;
+            }
+        }
+
+        matrix
+    }
+
+    /// Information-theoretic entropy of the vector's element distribution.
+    ///
+    /// Measures how much "information" a vector carries based on the
+    /// distribution of +1, -1, and 0 values. Normalized to [0, 1].
+    pub fn entropy(vec: &Vector) -> f64 {
+        let total = vec.dimensions() as f64;
+        if total == 0.0 {
+            return 0.0;
+        }
+
+        let pos = vec.data().iter().filter(|&&x| x > 0).count() as f64;
+        let neg = vec.data().iter().filter(|&&x| x < 0).count() as f64;
+        let zero = vec.data().iter().filter(|&&x| x == 0).count() as f64;
+
+        let probs = [pos / total, neg / total, zero / total];
+        let h: f64 = probs
+            .iter()
+            .filter(|&&p| p > 0.0)
+            .map(|&p| -p * p.log2())
+            .sum();
+
+        let max_h = 3.0f64.log2();
+        h / max_h
+    }
+
+    /// Reduce dimensionality via random projection (Johnson-Lindenstrauss).
+    ///
+    /// Preserves pairwise distances with high probability.
+    /// Uses sparse random projection (Achlioptas 2003).
+    pub fn random_project(vec: &Vector, target_dims: usize, seed: u64) -> Vector {
+        use rand::prelude::*;
+        use rand_chacha::ChaCha8Rng;
+
+        let source_dims = vec.dimensions();
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+        let mut projected = vec![0.0f64; target_dims];
+        let choices: [i8; 6] = [-1, 0, 0, 0, 0, 1];
+
+        for i in 0..target_dims {
+            let mut sum = 0.0f64;
+            for j in 0..source_dims {
+                let proj_val = choices[rng.gen_range(0..6)];
+                sum += (proj_val as f64) * (vec.data()[j] as f64);
+            }
+            projected[i] = sum;
+        }
+
+        Vector::from_f64(&projected)
+    }
+
+    /// Fractional binding: raise a vector to a real-valued power.
+    ///
+    /// - power=0 → zero vector
+    /// - power=1 → original vector
+    /// - Even integer power → all non-zero become +1
+    /// - Odd integer power → original vector
+    /// - Fractional → interpolation via scaling
+    pub fn power(vec: &Vector, exponent: f64) -> Vector {
+        assert!(exponent >= 0.0, "Exponent must be >= 0");
+
+        if exponent == 0.0 {
+            return Vector::zeros(vec.dimensions());
+        }
+
+        if (exponent - 1.0).abs() < 1e-10 {
+            return vec.clone();
+        }
+
+        let int_exp = exponent as u64;
+        if (exponent - int_exp as f64).abs() < 1e-10 && int_exp >= 2 {
+            if int_exp % 2 == 0 {
+                // Even power: all ±1 become +1, 0 stays 0
+                let data: Vec<i8> = vec
+                    .data()
+                    .iter()
+                    .map(|&v| if v != 0 { 1 } else { 0 })
+                    .collect();
+                return Vector::from_data(data);
+            } else {
+                return vec.clone();
+            }
+        }
+
+        // Fractional power: scale and threshold
+        let data: Vec<i8> = vec
+            .data()
+            .iter()
+            .map(|&v| {
+                let result = (v as f64) * exponent;
+                if result > 0.0 {
+                    1
+                } else if result < 0.0 {
+                    -1
+                } else {
+                    0
+                }
+            })
+            .collect();
+
+        Vector::from_data(data)
+    }
+
+    /// Compute similarity of a vector stream with itself at different lags.
+    ///
+    /// Peaks at lag k indicate period-k patterns.
+    /// Returns a vector of similarities: `acf[0] = 1.0`, `acf[k] = mean sim(t, t-k)`.
+    pub fn autocorrelate(stream: &[Vector], max_lag: usize) -> Vec<f64> {
+        let n = stream.len();
+        let max_lag = max_lag.min(n.saturating_sub(1));
+        let mut acf = Vec::with_capacity(max_lag + 1);
+
+        for lag in 0..=max_lag {
+            if lag == 0 {
+                acf.push(1.0);
+                continue;
+            }
+
+            let mut sum = 0.0;
+            let count = n - lag;
+            for i in lag..n {
+                sum += crate::similarity::Similarity::cosine(&stream[i], &stream[i - lag]);
+            }
+            acf.push(if count > 0 { sum / count as f64 } else { 0.0 });
+        }
+
+        acf
+    }
+
+    /// Compute similarity between two vector streams at different offsets.
+    ///
+    /// Detects causal relationships: a peak at lag k means patterns in
+    /// stream_b follow patterns in stream_a by k time steps.
+    pub fn cross_correlate(
+        stream_a: &[Vector],
+        stream_b: &[Vector],
+        max_lag: usize,
+    ) -> Vec<f64> {
+        let n = stream_a.len().min(stream_b.len());
+        let max_lag = max_lag.min(n.saturating_sub(1));
+        let mut xcf = Vec::with_capacity(max_lag + 1);
+
+        for lag in 0..=max_lag {
+            let mut sum = 0.0;
+            let count = n - lag;
+            for i in lag..n {
+                sum +=
+                    crate::similarity::Similarity::cosine(&stream_a[i - lag], &stream_b[i]);
+            }
+            xcf.push(if count > 0 { sum / count as f64 } else { 0.0 });
+        }
+
+        xcf
+    }
+
     /// Find structural breakpoints in a vector stream.
     ///
     /// Returns indices where segments begin (including 0).
@@ -939,5 +1218,239 @@ mod tests {
         assert!(!results.is_empty());
         assert_eq!(results[0].0, 0, "Should find 'a' (index 0) as top match");
         assert!(results[0].1 > 0.9, "Should have high similarity");
+    }
+
+    // =========================================================================
+    // Vector Operations Tests
+    // =========================================================================
+
+    fn make_bipolar(n: usize, seed: u64) -> Vector {
+        use rand::prelude::*;
+        use rand_chacha::ChaCha8Rng;
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let data: Vec<i8> = (0..n)
+            .map(|_| if rng.gen_bool(0.5) { 1 } else { -1 })
+            .collect();
+        Vector::from_data(data)
+    }
+
+    #[test]
+    fn test_sparsify_reduces_nonzero() {
+        let vec = make_bipolar(1024, 0);
+        let sparse = Primitives::sparsify(&vec, 100);
+        assert!(sparse.nnz() <= 100);
+    }
+
+    #[test]
+    fn test_sparsify_full_k() {
+        let vec = make_bipolar(64, 0);
+        let sparse = Primitives::sparsify(&vec, 100);
+        assert_eq!(sparse, vec);
+    }
+
+    #[test]
+    fn test_sparsify_preserves_signs() {
+        let vec = make_bipolar(1024, 1);
+        let sparse = Primitives::sparsify(&vec, 256);
+        for (s, &v) in sparse.data().iter().zip(vec.data().iter()) {
+            if *s != 0 {
+                assert_eq!(*s, v);
+            }
+        }
+    }
+
+    #[test]
+    fn test_centroid_single_vector() {
+        let v = make_bipolar(64, 0);
+        let c = Primitives::centroid(&[&v]);
+        let sim = crate::similarity::Similarity::cosine(&v, &c);
+        assert!(sim > 0.99, "Single vector centroid should match: {}", sim);
+    }
+
+    #[test]
+    fn test_centroid_is_bipolar() {
+        let a = make_bipolar(64, 0);
+        let b = make_bipolar(64, 1);
+        let c = Primitives::centroid(&[&a, &b]);
+        for &v in c.data() {
+            assert!(v >= -1 && v <= 1);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_centroid_empty() {
+        let _: Vector = Primitives::centroid(&[]);
+    }
+
+    #[test]
+    fn test_flip_negation() {
+        let vec = make_bipolar(1024, 0);
+        let flipped = Primitives::flip(&vec);
+        for (&orig, &fl) in vec.data().iter().zip(flipped.data().iter()) {
+            assert_eq!(fl, -orig);
+        }
+    }
+
+    #[test]
+    fn test_flip_double_identity() {
+        let vec = make_bipolar(64, 0);
+        let double_flipped = Primitives::flip(&Primitives::flip(&vec));
+        assert_eq!(double_flipped, vec);
+    }
+
+    #[test]
+    fn test_flip_anti_similar() {
+        let vec = make_bipolar(1024, 0);
+        let flipped = Primitives::flip(&vec);
+        let sim = crate::similarity::Similarity::cosine(&vec, &flipped);
+        assert!(sim < -0.99, "Flipped should be anti-similar: {}", sim);
+    }
+
+    #[test]
+    fn test_topk_similar_finds_exact() {
+        let query = make_bipolar(256, 0);
+        let candidates: Vec<Vector> = (1..=10)
+            .map(|i| make_bipolar(256, i))
+            .collect();
+        let mut candidates = candidates;
+        candidates[3] = query.clone();
+
+        let results = Primitives::topk_similar(&query, &candidates, 3);
+        assert_eq!(results[0].0, 3);
+        assert!(results[0].1 > 0.99);
+    }
+
+    #[test]
+    fn test_topk_similar_sorted() {
+        let query = make_bipolar(256, 0);
+        let candidates: Vec<Vector> = (1..=10)
+            .map(|i| make_bipolar(256, i))
+            .collect();
+        let results = Primitives::topk_similar(&query, &candidates, 10);
+        for w in results.windows(2) {
+            assert!(w[0].1 >= w[1].1);
+        }
+    }
+
+    #[test]
+    fn test_similarity_matrix_diagonal() {
+        let vecs: Vec<Vector> = (0..5).map(|i| make_bipolar(256, i)).collect();
+        let mat = Primitives::similarity_matrix(&vecs);
+        for i in 0..5 {
+            assert!((mat[i * 5 + i] - 1.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn test_similarity_matrix_symmetric() {
+        let vecs: Vec<Vector> = (0..4).map(|i| make_bipolar(256, i)).collect();
+        let mat = Primitives::similarity_matrix(&vecs);
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!((mat[i * 4 + j] - mat[j * 4 + i]).abs() < 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn test_entropy_all_ones() {
+        let vec = Vector::from_data(vec![1; 1024]);
+        let h = Primitives::entropy(&vec);
+        assert!(h < 0.1, "All-ones should have low entropy: {}", h);
+    }
+
+    #[test]
+    fn test_entropy_balanced() {
+        let vec = make_bipolar(1024, 42);
+        let h = Primitives::entropy(&vec);
+        assert!(h > 0.5, "Balanced should have high entropy: {}", h);
+    }
+
+    #[test]
+    fn test_entropy_range() {
+        let vec = make_bipolar(1024, 0);
+        let h = Primitives::entropy(&vec);
+        assert!(h >= 0.0 && h <= 1.0);
+    }
+
+    #[test]
+    fn test_random_project_dimensionality() {
+        let v = make_bipolar(1024, 0);
+        let projected = Primitives::random_project(&v, 128, 42);
+        assert_eq!(projected.dimensions(), 128);
+    }
+
+    #[test]
+    fn test_random_project_deterministic() {
+        let v = make_bipolar(1024, 0);
+        let p1 = Primitives::random_project(&v, 128, 99);
+        let p2 = Primitives::random_project(&v, 128, 99);
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn test_random_project_different_seeds() {
+        let v = make_bipolar(1024, 0);
+        let p1 = Primitives::random_project(&v, 128, 1);
+        let p2 = Primitives::random_project(&v, 128, 2);
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn test_power_one_identity() {
+        let vec = make_bipolar(64, 0);
+        assert_eq!(Primitives::power(&vec, 1.0), vec);
+    }
+
+    #[test]
+    fn test_power_zero_zeros() {
+        let vec = make_bipolar(64, 0);
+        let result = Primitives::power(&vec, 0.0);
+        assert!(result.data().iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn test_power_even_positive() {
+        let vec = make_bipolar(64, 0);
+        let result = Primitives::power(&vec, 2.0);
+        assert!(result.data().iter().all(|&v| v >= 0));
+    }
+
+    #[test]
+    fn test_power_odd_preserves() {
+        let vec = make_bipolar(64, 0);
+        assert_eq!(Primitives::power(&vec, 3.0), vec);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_power_negative_panics() {
+        let vec = make_bipolar(64, 0);
+        Primitives::power(&vec, -1.0);
+    }
+
+    #[test]
+    fn test_autocorrelate_lag_zero() {
+        let stream: Vec<Vector> = (0..20).map(|i| make_bipolar(64, i)).collect();
+        let acf = Primitives::autocorrelate(&stream, 5);
+        assert_eq!(acf[0], 1.0);
+    }
+
+    #[test]
+    fn test_autocorrelate_periodic() {
+        let a = make_bipolar(256, 0);
+        let b = make_bipolar(256, 1);
+        let stream: Vec<Vector> = (0..40).map(|i| if i % 2 == 0 { a.clone() } else { b.clone() }).collect();
+        let acf = Primitives::autocorrelate(&stream, 6);
+        // Period-2 pattern: lag=2 should be higher than lag=1
+        assert!(acf[2] > acf[1], "acf[2]={} should > acf[1]={}", acf[2], acf[1]);
+    }
+
+    #[test]
+    fn test_cross_correlate_identical() {
+        let stream: Vec<Vector> = (0..20).map(|i| make_bipolar(64, i)).collect();
+        let xcf = Primitives::cross_correlate(&stream, &stream, 5);
+        assert!(xcf[0] > 0.9);
     }
 }
