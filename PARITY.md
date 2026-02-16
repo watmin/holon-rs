@@ -1,47 +1,54 @@
 # Python → Rust Parity Gaps
 
 **Audit date:** February 2026
+**Last updated:** February 2026
 
-The core algebra, encoding, and accumulator are at full parity. These are
-the remaining gaps from the Python implementation that need porting.
+The core algebra, encoding, accumulator, distance metrics, and vector manager
+utilities are at full parity. These are the remaining gaps from the Python
+implementation that need porting.
 
-## Distance Metrics (similarity.rs)
+## Distance Metrics (similarity.rs) — ✅ COMPLETE
 
-Python's `distance.py` has 11 metrics. Rust has 6. Missing:
+Python's `distance.py` has 11 metrics. Rust now has all 11.
 
-| Metric | Python Function | Priority | Notes |
-|---|---|---|---|
-| Agreement | `agreement_similarity()` | Medium | Non-zero dimension agreement rate |
-| Chebyshev | `chebyshev_distance/similarity()` | Low | L∞ norm, max single-dimension diff |
-| Minkowski | `minkowski_distance()` | Low | Generalized Lp norm (p parameter) |
-| Weighted Cosine | `weighted_cosine_similarity()` | Medium | Per-dimension weight vector |
-| Weighted Euclidean | `weighted_euclidean_distance()` | Low | Per-dimension weight vector |
+| Metric | Rust API | Status |
+|---|---|---|
+| Cosine | `Metric::Cosine` | ✅ |
+| Dot Product | `Metric::Dot` | ✅ |
+| Euclidean | `Metric::Euclidean` | ✅ |
+| Manhattan | `Metric::Manhattan` | ✅ |
+| Hamming | `Metric::Hamming` | ✅ |
+| Overlap | `Metric::Overlap` | ✅ |
+| Agreement | `Metric::Agreement` | ✅ Added |
+| Chebyshev | `Metric::Chebyshev` | ✅ Added |
+| Minkowski | `Similarity::minkowski(a, b, p)` | ✅ Added (standalone, needs `p`) |
+| Weighted Cosine | `Similarity::weighted_cosine(a, b, weights)` | ✅ Added (standalone, needs `weights`) |
+| Weighted Euclidean | `Similarity::weighted_euclidean(a, b, weights)` | ✅ Added (standalone, needs `weights`) |
 
-**Implementation:** Add variants to `Metric` enum in `similarity.rs`. Each
-is 5-15 lines. Weighted metrics need a `weights: &[f64]` parameter — either
-add to `Metric` enum as `WeightedCosine { weights }` or add separate methods
-on `Similarity`.
+**Design note:** Agreement and Chebyshev are on the `Metric` enum (dispatched
+via `Similarity::compute()`). Minkowski, Weighted Cosine, and Weighted Euclidean
+are standalone methods on `Similarity` because they require extra parameters
+(`p: f64` or `weights: &[f64]`) that don't fit in a `Copy + Eq` enum. All three
+are also exposed on `Holon` as convenience methods.
 
-## VectorManager Utilities (vector_manager.rs)
+## VectorManager Utilities (vector_manager.rs) — ✅ COMPLETE
 
-| Function | Python | Priority | Notes |
-|---|---|---|---|
-| `get_position_vector(pos)` | `vector_manager.py:152` | Medium | Positional encoding for sequences |
-| `export_codebook()` | `vector_manager.py:198` | Low | Serialize cached vectors to bytes |
-| `import_codebook(data)` | `vector_manager.py:204` | Low | Restore cached vectors from bytes |
-| `verify_determinism(atoms, n)` | `vector_manager.py:210` | Low | Test that same atom → same vector across calls |
+| Function | Rust API | Status |
+|---|---|---|
+| `get_position_vector(pos)` | `VectorManager::get_position_vector(pos)` | ✅ Added |
+| `export_codebook()` | `VectorManager::export_codebook()` | ✅ Added |
+| `import_codebook(data)` | `VectorManager::import_codebook(codebook)` | ✅ Added |
+| `verify_determinism(atoms, n)` | `#[test] test_verify_determinism` | ✅ Added as test |
 
-**`get_position_vector`** is the most useful — it's used by positional
-sequence encoding. Check if `encode_sequence(Positional)` in Rust generates
-position vectors internally or needs this.
+**`get_position_vector`** uses `__pos__{position}` as the atom key, matching
+the Python `_position_to_seed()` approach. Position vectors are cached
+separately from atom vectors.
 
-**Codebook export/import** enables saving and restoring the vector cache
-across process restarts. Useful for distributed deployments where multiple
-nodes need identical vector mappings. Low priority since deterministic
-seeding already guarantees identical vectors for identical atoms.
+**Codebook export/import** serializes the atom cache as `HashMap<String, Vec<i8>>`.
+Import overwrites on conflict, preserving existing entries otherwise.
 
-**`verify_determinism`** is a test utility. Could be a `#[test]` instead
-of a public API method.
+**`verify_determinism`** is a `#[test]` rather than a public API method, since
+it's a testing concern — same as the Python version, but more idiomatic for Rust.
 
 ## Mathematical Primitives (encoder.py)
 
@@ -107,14 +114,12 @@ Everything else is at full parity:
 - All 8 accumulator operations (add, decay, merge, threshold, etc.)
 - All 4 sequence encoding modes (bundle, positional, chained, ngram)
 - All 3 scalar encoding modes (linear, log, circular)
+- All 11 distance/similarity metrics
+- Vector manager with position vectors, codebook export/import
 - JSON and Walkable encoding
 - SIMD-accelerated similarity (Rust-only advantage)
 
-## Suggested Porting Order
+## Remaining (Low Priority)
 
-1. **Agreement similarity** — small, useful for the DDoS detection loop
-2. **Weighted cosine** — useful for importance-weighted comparisons
-3. **get_position_vector** — check if sequence encoding needs it
-4. **Chebyshev / Minkowski** — completeness, low urgency
-5. **Codebook export/import** — when distributed deployment is needed
-6. **Mathematical primitives** — when non-network use cases arise
+1. **Mathematical primitives** — domain-specific encodings, better as extension crate
+2. **AdvancedSimilarityEngine** — convenience composites, easy to build in userland

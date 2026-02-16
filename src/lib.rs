@@ -292,6 +292,8 @@ impl Holon {
 
     /// Remove a component's influence from a superposition (NOT operation).
     ///
+    /// Uses the default "subtract" method. See `negate_with_method` for alternatives.
+    ///
     /// # Example
     /// ```rust
     /// use holon::Holon;
@@ -305,6 +307,21 @@ impl Holon {
     /// ```
     pub fn negate(&self, superposition: &Vector, component: &Vector) -> Vector {
         Primitives::negate(superposition, component)
+    }
+
+    /// Remove a component with a specific negation method.
+    ///
+    /// Methods:
+    /// - `Subtract` (default): Subtract component values, clamp to [-1, 1]
+    /// - `Zero`: Zero out positions where component is non-zero
+    /// - `Invert`: Add the inverted component
+    pub fn negate_with_method(
+        &self,
+        superposition: &Vector,
+        component: &Vector,
+        method: NegateMethod,
+    ) -> Vector {
+        Primitives::negate_with_method(superposition, component, method)
     }
 
     /// Strengthen a component's presence in a superposition.
@@ -403,6 +420,49 @@ impl Holon {
     /// Compute similarity with a specific metric.
     pub fn similarity_with_metric(&self, a: &Vector, b: &Vector, metric: Metric) -> f64 {
         Similarity::compute(a, b, metric)
+    }
+
+    /// Compute Minkowski (Lp) similarity.
+    ///
+    /// Generalized distance metric: p=1 is Manhattan, p=2 is Euclidean.
+    /// Returns 1 / (1 + distance).
+    pub fn minkowski_similarity(&self, a: &Vector, b: &Vector, p: f64) -> f64 {
+        Similarity::minkowski(a, b, p)
+    }
+
+    /// Compute weighted cosine similarity with per-dimension weights.
+    pub fn weighted_cosine_similarity(&self, a: &Vector, b: &Vector, weights: &[f64]) -> f64 {
+        Similarity::weighted_cosine(a, b, weights)
+    }
+
+    /// Compute weighted Euclidean similarity with per-dimension weights.
+    ///
+    /// Returns 1 / (1 + weighted_distance).
+    pub fn weighted_euclidean_similarity(&self, a: &Vector, b: &Vector, weights: &[f64]) -> f64 {
+        Similarity::weighted_euclidean(a, b, weights)
+    }
+
+    // =========================================================================
+    // Vector Manager Utilities
+    // =========================================================================
+
+    /// Get a deterministic position vector for sequence encoding.
+    ///
+    /// Useful for custom positional encoding outside of `encode_sequence`.
+    pub fn get_position_vector(&self, position: i64) -> Vector {
+        self.vector_manager.get_position_vector(position)
+    }
+
+    /// Export the atom codebook for persistence or distribution.
+    ///
+    /// Returns atom names mapped to their raw vector data.
+    pub fn export_codebook(&self) -> std::collections::HashMap<String, Vec<i8>> {
+        self.vector_manager.export_codebook()
+    }
+
+    /// Import a previously exported codebook.
+    pub fn import_codebook(&self, codebook: std::collections::HashMap<String, Vec<i8>>) {
+        self.vector_manager.import_codebook(codebook)
     }
 
     // =========================================================================
