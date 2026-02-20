@@ -98,6 +98,10 @@ impl Engram {
         &self.metadata
     }
 
+    pub fn metadata_mut(&mut self) -> &mut HashMap<String, serde_json::Value> {
+        &mut self.metadata
+    }
+
     /// Number of training observations seen when this engram was minted.
     pub fn n(&self) -> usize {
         self.snapshot.n
