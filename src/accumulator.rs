@@ -196,7 +196,7 @@ impl Accumulator {
         let l2_sq: f64 = self.sums.iter().map(|&x| x * x).sum();
         let estimated_items = l2_sq / d;
 
-        (1.0 - estimated_items / max_items).max(0.0).min(1.0)
+        (1.0 - estimated_items / max_items).clamp(0.0, 1.0)
     }
 
     /// Quantum-inspired purity measure: how concentrated is the accumulator?

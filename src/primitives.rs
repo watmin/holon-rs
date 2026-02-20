@@ -822,13 +822,13 @@ impl Primitives {
         let mut projected = vec![0.0f64; target_dims];
         let choices: [i8; 6] = [-1, 0, 0, 0, 0, 1];
 
-        for i in 0..target_dims {
+        for p in projected.iter_mut().take(target_dims) {
             let mut sum = 0.0f64;
             for j in 0..source_dims {
                 let proj_val = choices[rng.gen_range(0..6)];
                 sum += (proj_val as f64) * (vec.data()[j] as f64);
             }
-            projected[i] = sum;
+            *p = sum;
         }
 
         Vector::from_f64(&projected)
@@ -964,7 +964,7 @@ impl Primitives {
             }
             SegmentMethod::Prototype => {
                 for i in 1..stream.len() {
-                    let start = if i > window { i - window } else { 0 };
+                    let start = i.saturating_sub(window);
                     let window_vecs: Vec<&Vector> = stream[start..i].iter().collect();
                     let baseline = Self::prototype(&window_vecs, 0.5);
                     let sim = crate::similarity::Similarity::cosine(&stream[i], &baseline);

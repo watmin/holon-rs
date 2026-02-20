@@ -89,9 +89,9 @@ impl VectorManager {
         // Generate random bipolar vector with {-1, 0, 1}
         // Match Python's distribution: 1/3 probability each
         let mut data = vec![0i8; self.dimensions];
-        for i in 0..self.dimensions {
+        for d in data.iter_mut().take(self.dimensions) {
             let r = rng.next_u32() % 3;
-            data[i] = match r {
+            *d = match r {
                 0 => -1,
                 1 => 0,
                 2 => 1,

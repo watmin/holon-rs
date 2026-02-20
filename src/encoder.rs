@@ -508,8 +508,8 @@ impl Encoder {
             (&role_month, &month_vec),
             (&role_pos, &pos_vec),
         ] {
-            for i in 0..dim {
-                sums[i] += role.data()[i] as f64 * comp.data()[i] as f64;
+            for (i, s) in sums.iter_mut().enumerate().take(dim) {
+                *s += role.data()[i] as f64 * comp.data()[i] as f64;
             }
         }
 
@@ -533,14 +533,14 @@ impl Encoder {
         let dim = self.dimensions();
         let mut data = vec![0i8; dim];
 
-        for i in 0..dim {
+        for (i, d) in data.iter_mut().enumerate().take(dim) {
             let freq = 1.0 / scale.powf(i as f64 / dim as f64);
             let value = if i % 2 == 0 {
                 (position * freq).sin()
             } else {
                 (position * freq).cos()
             };
-            data[i] = if value > 0.0 {
+            *d = if value > 0.0 {
                 1
             } else if value < 0.0 {
                 -1

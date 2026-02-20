@@ -2,12 +2,17 @@
 name = "holon"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.70"
 authors = ["Holon Contributors"]
 description = "Programmatic Neural Memory using Vector Symbolic Architectures"
 license = "MIT"
-repository = "https://github.com/holon/holon-rs"
+repository = "https://github.com/watmin/holon-rs"
+homepage = "https://github.com/watmin/holon-rs"
+documentation = "https://docs.rs/holon"
+readme = "README.md"
 keywords = ["vsa", "hdc", "hyperdimensional", "vector", "similarity"]
 categories = ["science", "data-structures", "encoding"]
+exclude = ["assets/**", "PARITY.md"]
 
 [lib]
 name = "holon"

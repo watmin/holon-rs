@@ -189,8 +189,8 @@ impl OnlineSubspace {
         // Update running mean
         let n_minus_1_over_n = (n - 1.0) / n;
         let one_over_n = 1.0 / n;
-        for i in 0..self.dim {
-            self.mean[i] = n_minus_1_over_n * self.mean[i] + one_over_n * x[i];
+        for (i, m) in self.mean.iter_mut().enumerate().take(self.dim) {
+            *m = n_minus_1_over_n * *m + one_over_n * x[i];
         }
 
         // Center
@@ -198,9 +198,7 @@ impl OnlineSubspace {
 
         if !self.initialized && self.n == 1 {
             // Seed first component with the first centered observation
-            for j in 0..self.dim {
-                self.components[j] = x_c[j];
-            }
+            self.components[..self.dim].copy_from_slice(&x_c[..self.dim]);
             self.initialized = true;
             // Update threshold EMA with this initial residual
             self.update_threshold_ema(res);
@@ -215,8 +213,8 @@ impl OnlineSubspace {
                 if norm(&x_c) > 1e-10 {
                     let scale = (1.0 + amn) / n;
                     let base = i * self.dim;
-                    for j in 0..self.dim {
-                        self.components[base + j] = x_c[j] * scale;
+                    for (j, c) in self.components[base..base + self.dim].iter_mut().enumerate() {
+                        *c = x_c[j] * scale;
                     }
                 }
             } else {
@@ -229,9 +227,8 @@ impl OnlineSubspace {
                 // Weng et al. CCIPCA update
                 let decay = (n - 1.0 - amn) / n;
                 let grow = (1.0 + amn) / n * x_c_proj;
-                for j in 0..self.dim {
-                    self.components[base + j] =
-                        decay * self.components[base + j] + grow * x_c[j];
+                for (j, c) in self.components[base..base + self.dim].iter_mut().enumerate() {
+                    *c = decay * *c + grow * x_c[j];
                 }
             }
 
@@ -242,8 +239,8 @@ impl OnlineSubspace {
                 let proj: f64 = (0..self.dim)
                     .map(|j| x_c[j] * self.components[base + j] / v_new_norm)
                     .sum();
-                for j in 0..self.dim {
-                    x_c[j] -= proj * self.components[base + j] / v_new_norm;
+                for (j, xc) in x_c.iter_mut().enumerate().take(self.dim) {
+                    *xc -= proj * self.components[base + j] / v_new_norm;
                 }
             }
         }
@@ -282,8 +279,8 @@ impl OnlineSubspace {
             let proj: f64 = (0..self.dim)
                 .map(|j| x_c[j] * self.components[base + j] / v_norm)
                 .sum();
-            for j in 0..self.dim {
-                x_c[j] -= proj * self.components[base + j] / v_norm;
+            for (j, xc) in x_c.iter_mut().enumerate().take(self.dim) {
+                *xc -= proj * self.components[base + j] / v_norm;
             }
         }
 
@@ -313,15 +310,14 @@ impl OnlineSubspace {
         assert_eq!(x.len(), self.dim);
         let coeffs = self.project(x);
         let mut result = self.mean.clone();
-        for i in 0..self.k {
+        for (i, &coeff) in coeffs.iter().enumerate().take(self.k) {
             let v_norm = self.component_norm(i);
             if v_norm < 1e-10 {
                 continue;
             }
             let base = i * self.dim;
-            let coeff = coeffs[i];
-            for j in 0..self.dim {
-                result[j] += coeff * self.components[base + j] / v_norm;
+            for (j, r) in result.iter_mut().enumerate().take(self.dim) {
+                *r += coeff * self.components[base + j] / v_norm;
             }
         }
         result
@@ -399,19 +395,19 @@ impl OnlineSubspace {
             if norms[i] < 1e-10 {
                 continue;
             }
-            for j in 0..i {
-                if norms[j] < 1e-10 {
+            for (j, &nj) in norms.iter().enumerate().take(i) {
+                if nj < 1e-10 {
                     continue;
                 }
                 // proj = dot(component_i, unit_j)
                 let base_i = i * self.dim;
                 let base_j = j * self.dim;
                 let proj: f64 = (0..self.dim)
-                    .map(|d| self.components[base_i + d] * self.components[base_j + d] / norms[j])
+                    .map(|d| self.components[base_i + d] * self.components[base_j + d] / nj)
                     .sum();
                 // component_i -= proj * unit_j
                 for d in 0..self.dim {
-                    let sub = proj * self.components[base_j + d] / norms[j];
+                    let sub = proj * self.components[base_j + d] / nj;
                     self.components[base_i + d] -= sub;
                 }
             }
