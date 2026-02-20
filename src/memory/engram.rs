@@ -104,7 +104,7 @@ impl Engram {
     }
 
     /// Lazily reconstruct the [`OnlineSubspace`] from the stored snapshot.
-    fn subspace(&mut self) -> &OnlineSubspace {
+    pub fn subspace(&mut self) -> &OnlineSubspace {
         if self.subspace_cache.is_none() {
             self.subspace_cache = Some(Box::new(OnlineSubspace::from_snapshot(
                 self.snapshot.clone(),
