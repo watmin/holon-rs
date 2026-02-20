@@ -12,7 +12,52 @@
 *The sorcerer computes in high dimensions. Similarity becomes destiny.*
 </div>
 
-High-performance Vector Symbolic Architecture library in Rust. Encode structured data as vectors, compose with algebraic primitives, learn patterns from streams. Same foundations as Python Holon, but **12x faster**.
+High-performance Vector Symbolic Architecture library in Rust. Encode structured data as vectors, compose with algebraic primitives, learn patterns from streams, detect anomalies online. Same foundations as Python Holon, but **12x faster**.
+
+## Architecture
+
+Three layers, same as Python Holon:
+
+```
+┌─────────────────────────────────────────────┐
+│  Holon facade  (convenience wrapper)        │
+├─────────────────────────────────────────────┤
+│  memory::  OnlineSubspace, EngramLibrary    │
+├─────────────────────────────────────────────┤
+│  primitives:: / encoder:: / scalar::        │
+│  similarity:: / accumulator:: / walkable::  │
+│  vector:: / vector_manager::                │
+└─────────────────────────────────────────────┘
+```
+
+1. **Kernel** — VSA primitives, encoding, similarity, accumulators, walkable trait
+2. **Memory** — Online subspace learning (CCIPCA), engram storage and recall
+3. **Holon facade** — Convenience wrapper that owns an `Encoder` and delegates
+
+Everything is usable at any level:
+
+```rust
+// Direct module imports — full control
+use holon::primitives::Primitives;
+use holon::similarity::{Similarity, Metric};
+use holon::memory::OnlineSubspace;
+
+let sim = Similarity::cosine(&a, &b);
+let bound = Primitives::bind(&role, &filler);
+let mut sub = OnlineSubspace::new(4096, 32);
+
+// Crate-level re-exports — less typing, same types
+use holon::{OnlineSubspace, Metric, Similarity};
+
+// Holon facade — most ergonomic for common workflows
+use holon::Holon;
+let holon = Holon::new(4096);
+let vec = holon.encode_json(r#"{"key": "value"}"#)?;
+let sim = holon.similarity(&a, &b);
+let sub = holon.create_subspace(32);
+```
+
+The facade never hides functionality — it delegates to the same public types you can use directly.
 
 ## Quick Start
 
@@ -169,14 +214,13 @@ New operations for explainable anomaly forensics:
 
 ### Continuous Scalar Encoding
 
-Encode rates, temperatures, angles - where similar values have similar vectors:
+Encode rates, temperatures, angles, timestamps — where similar values have similar vectors:
 
 ```rust
 // Log-scale: equal ratios = equal similarity
 let r100 = holon.encode_scalar_log(100.0);
 let r1000 = holon.encode_scalar_log(1000.0);
 let r10000 = holon.encode_scalar_log(10000.0);
-
 // 100→1000 similarity ≈ 1000→10000 (both 10x ratio)
 
 // Circular: hour 23 is similar to hour 0
@@ -184,37 +228,90 @@ let h23 = holon.encode_scalar(23.0, ScalarMode::Circular { period: 24.0 });
 let h0 = holon.encode_scalar(0.0, ScalarMode::Circular { period: 24.0 });
 ```
 
-### Inline Numeric Markers ($log, $linear)
+| Mode | Use Case | Similarity Property |
+|------|----------|---------------------|
+| `$log` | Packet rates, file sizes, frequencies | Equal ratios = equal similarity |
+| `$linear` | Temperatures, positions | Equal differences = equal similarity |
+| `$time` | Unix timestamps, event times | Circular (hour/dow/month) + positional |
 
-Embed magnitude-aware encoding directly in JSON records:
+### Temporal Encoding
+
+Encode Unix timestamps with circular periodicity — same hour next week ≈ same vector:
 
 ```rust
-// Without marker: "100" and "101" are completely different strings
-let r1 = holon.encode_json(r#"{"rate": 100}"#)?;
-let r2 = holon.encode_json(r#"{"rate": 101}"#)?;
-// Low similarity - different strings
+use holon::{ScalarValue, TimeResolution};
 
-// With $log marker: values encode by magnitude
-let r1 = holon.encode_json(r#"{"rate": {"$log": 100}}"#)?;
-let r2 = holon.encode_json(r#"{"rate": {"$log": 101}}"#)?;
-// High similarity - similar magnitudes
+// Default resolution (Hour)
+let morning = ScalarValue::time(1_700_000_000.0);
 
-// $log: Equal ratios = equal similarity drops (good for rates, sizes, frequencies)
-// - 100 → 1000 (10x) same drop as 1000 → 10000 (10x)
-
-// $linear: Equal differences = equal similarity drops (good for temperatures, positions)
-// - 10 → 20 (+10) same drop as 100 → 110 (+10)
-
-// Control decay rate with $scale
-let slow_decay = holon.encode_json(r#"{"rate": {"$log": 100, "$scale": 5000}}"#)?;
-// Higher scale = more similar for same ratio
+// Explicit resolution for finer/coarser discrimination
+let precise = ScalarValue::time_with_resolution(ts, TimeResolution::Second);
+let coarse = ScalarValue::time_with_resolution(ts, TimeResolution::Day);
 ```
 
-| Marker | Use Case | Similarity Property |
-|--------|----------|---------------------|
-| `$log` | Packet rates, file sizes, frequencies | Equal ratios = equal similarity |
-| `$linear` | Temperatures, positions, timestamps | Equal differences = equal similarity |
-| `$scale` | Tune sensitivity | Higher = slower decay |
+TimeFloat decomposes timestamps into four components bound by role vectors:
+- **Hour-of-day** (circular, period=24) — 9am clusters with 9am
+- **Day-of-week** (circular, period=7) — Monday clusters with Monday
+- **Month** (circular, period=12) — seasonal patterns
+- **Position** (transformer sin/cos) — absolute discrimination, resolution-dependent
+
+### Memory Layer: OnlineSubspace + Engrams
+
+Learn what "normal" looks like from a stream, then score new observations:
+
+```rust
+use holon::memory::{OnlineSubspace, EngramLibrary};
+
+let holon = Holon::new(4096);
+
+// Learn the normal traffic manifold online (CCIPCA algorithm)
+let mut subspace = holon.create_subspace(32);
+for event in training_events {
+    let vec = holon.encode_walkable(&event);
+    subspace.update(&vec.to_f64());
+}
+
+// Score new observations: residual > threshold → anomaly
+let probe = holon.encode_walkable(&new_event);
+if subspace.residual(&probe.to_f64()) > subspace.threshold() {
+    println!("anomaly detected");
+}
+
+// Store learned patterns as named engrams
+let mut library = holon.create_engram_library();
+library.add("normal_traffic", &subspace, None, Default::default());
+
+// Later: recall the best-matching pattern
+let matches = library.match_vec(&probe.to_f64(), 3, 10);
+// Returns [(name, residual)] sorted ascending — lower = better fit
+```
+
+### Walkable Trait: Zero-Serialization Encoding
+
+Skip JSON entirely — encode your structs directly:
+
+```rust
+use holon::{Walkable, WalkType, WalkableRef, ScalarValue, WalkableValue};
+
+struct Packet {
+    protocol: String,
+    dst_port: u16,
+    rate_pps: f64,
+}
+
+impl Walkable for Packet {
+    fn walk_type(&self) -> WalkType { WalkType::Map }
+    fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
+        vec![
+            ("protocol", WalkableValue::Scalar(ScalarValue::String(self.protocol.clone()))),
+            ("dst_port", (self.dst_port as i64).to_walkable_value()),
+            ("rate", WalkableValue::Scalar(ScalarValue::log(self.rate_pps))),
+        ]
+    }
+}
+
+let vec = holon.encode_walkable(&my_packet);
+```
 
 ### Accumulators: Frequency Matters
 
@@ -237,26 +334,34 @@ holon.accumulate(&mut acc, &rare);
 ## Examples
 
 ```bash
-# Zero-hardcode detection (DNS, SYN, NTP attacks)
+# --- Showcases (compositional algebra + memory, cross-domain) ---
+cargo run --example compositional_recall --release      # algebraic queries over incident library
+cargo run --example streaming_changepoint --release     # unlabeled phase detection: segment + invert
+cargo run --example config_drift_remediation --release  # detect drift, attribute fields, remediate
+
+# --- Anomaly detection (network traffic) ---
 cargo run --example zero_hardcode_detection --release --features simd
-
-# Pure vector rate detection
 cargo run --example pure_vector_rate --release --features simd
-
-# Explainable anomaly forensics (Batch 014 - extended primitives)
-cargo run --example explainable_forensics --release
-
-# Zero-shot attack variant detection (analogy)
-cargo run --example attack_variant_detection --release
-
-# Improved detection with pattern attribution
 cargo run --example improved_detection --release
+cargo run --example payload_anomaly_detection --release
 
-# Targeted rate limiting (wider separation)
+# --- Walkable (zero-serialization) ---
+cargo run --example walkable_detection --release
+cargo run --example walkable_rate --release
+
+# --- Memory layer (OnlineSubspace + Engrams) ---
+cargo run --example online_anomaly_memory --release
+cargo run --example temporal_encoding --release
+
+# --- Extended primitives ---
+cargo run --example explainable_forensics --release
+cargo run --example attack_variant_detection --release
 cargo run --example targeted_rate_limiting --release
+cargo run --example rate_limit_mitigation --release
 
-# Magnitude-aware encoding (Batch 015 - $log/$linear markers)
+# --- Encoding ---
 cargo run --example magnitude_aware_encoding --release
+cargo run --example byte_match_derivation --release
 
 # Run all tests
 cargo test
@@ -286,24 +391,23 @@ cargo test --features simd
 ```
 holon-rs/
 ├── src/
-│   ├── lib.rs           # Main Holon interface
-│   ├── vector.rs        # Bipolar vectors {-1, 0, 1}
+│   ├── lib.rs            # Public API + Holon convenience wrapper
+│   ├── vector.rs         # Bipolar vectors {-1, 0, 1}
 │   ├── vector_manager.rs # Deterministic atom→vector
-│   ├── primitives.rs    # VSA operations
-│   ├── encoder.rs       # JSON→vector encoding
-│   ├── scalar.rs        # Continuous value encoding
-│   ├── accumulator.rs   # Streaming primitives
-│   ├── similarity.rs    # Metrics (cosine, dot, etc.)
-│   └── error.rs         # Error types
-├── examples/
-│   ├── zero_hardcode_detection.rs  # Full Batch 012 demo
-│   ├── pure_vector_rate.rs         # Challenge 008 port
-│   ├── explainable_forensics.rs    # Batch 014 extended primitives
-│   ├── attack_variant_detection.rs # Zero-shot detection via analogy
-│   ├── improved_detection.rs       # Pattern attribution
-│   └── targeted_rate_limiting.rs   # Dimension-level rate limiting
+│   ├── primitives.rs     # VSA operations
+│   ├── encoder.rs        # JSON + Walkable → vector encoding
+│   ├── walkable.rs       # Zero-serialization Walkable trait
+│   ├── scalar.rs         # Continuous value encoding
+│   ├── accumulator.rs    # Streaming primitives
+│   ├── similarity.rs     # Metrics (cosine, dot, etc.)
+│   ├── error.rs          # Error types
+│   └── memory/
+│       ├── mod.rs        # Re-exports
+│       ├── subspace.rs   # OnlineSubspace (CCIPCA)
+│       └── engram.rs     # Engram + EngramLibrary
+├── examples/             # 17 runnable demos
 └── benches/
-    └── benchmarks.rs    # Criterion benchmarks
+    └── benchmarks.rs     # Criterion benchmarks
 ```
 
 <div align="center">
@@ -322,9 +426,14 @@ holon-rs/
 | Extended primitives (Batch 014) | ✅ | ✅ |
 | Accumulators | ✅ | ✅ |
 | Scalar encoding (linear/log/circular) | ✅ | ✅ |
-| Inline numeric markers ($log, $linear) | ✅ | ✅ |
+| Temporal encoding (TimeFloat) | ✅ | ✅ |
+| Inline numeric markers ($log, $linear, $time) | ✅ | ✅ |
+| Walkable trait (zero-serialization) | ✅ | ✅ |
+| OnlineSubspace (CCIPCA) | ✅ | ✅ |
+| Engram / EngramLibrary | ✅ | ✅ |
 | Sequence encoding | ✅ | ✅ |
 | SIMD acceleration | ❌ | ✅ |
+| Persistence (CPU/Qdrant store) | ✅ | — (deferred) |
 | Zero-hardcode detection | ✅ | ✅ (12x faster) |
 
 ## See Also

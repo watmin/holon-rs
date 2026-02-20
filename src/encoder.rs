@@ -21,7 +21,9 @@ use crate::error::Result;
 use crate::primitives::Primitives;
 use crate::vector::Vector;
 use crate::vector_manager::VectorManager;
-use crate::walkable::{ScalarRef, ScalarValue, WalkType, Walkable, WalkableRef, WalkableValue};
+use crate::walkable::{
+    ScalarRef, ScalarValue, TimeResolution, WalkType, Walkable, WalkableRef, WalkableValue,
+};
 use serde_json::Value;
 
 /// Encoder for converting structured data to vectors.
@@ -179,12 +181,11 @@ impl Encoder {
     fn encode_scalar_value(&self, scalar: &ScalarValue, prefix: Option<&str>) -> Vector {
         // Handle numeric scalars with magnitude-aware encoding
         match scalar {
-            ScalarValue::LogFloat { value, scale } => {
-                self.encode_scalar_log(*value, *scale)
-            }
+            ScalarValue::LogFloat { value, scale } => self.encode_scalar_log(*value, *scale),
             ScalarValue::LinearFloat { value, scale } => {
                 self.encode_scalar_linear(*value, *scale)
             }
+            ScalarValue::TimeFloat { value, resolution } => self.encode_time(*value, resolution),
             // Standard scalars use atom encoding
             _ => {
                 let atom = scalar.to_atom();
@@ -200,6 +201,7 @@ impl Encoder {
         match scalar {
             ScalarRef::LogFloat { value, scale } => self.encode_scalar_log(value, scale),
             ScalarRef::LinearFloat { value, scale } => self.encode_scalar_linear(value, scale),
+            ScalarRef::TimeFloat { value, resolution } => self.encode_time(value, &resolution),
             // Standard scalars use atom encoding
             _ => {
                 let atom = scalar.to_atom();
@@ -418,6 +420,112 @@ impl Encoder {
     /// * `scale` - Controls similarity decay rate (default 1000.0)
     pub fn encode_scalar_linear(&self, value: f64, scale: f64) -> Vector {
         self.encode_scalar_positional(value, scale)
+    }
+
+    /// Time-aware encoding: circular (hour-of-day, day-of-week, month) + positional.
+    ///
+    /// Matches Python's `_encode_time()` exactly, including role vector names.
+    /// Role vector names are deliberately identical across languages for cross-language
+    /// determinism: same seed → same role vectors → same encoded output.
+    fn encode_time(&self, timestamp: f64, resolution: &TimeResolution) -> Vector {
+        let dim = self.dimensions();
+
+        // --- Decompose Unix timestamp with integer arithmetic (no chrono needed) ---
+        let secs = timestamp as i64;
+
+        // Seconds elapsed in current day (handles negative timestamps correctly)
+        let sec_of_day = ((secs % 86400) + 86400) % 86400;
+        let hour_frac = sec_of_day as f64 / 3600.0;
+
+        // Day of week: Jan 1 1970 was Thursday (4). Add days elapsed.
+        let days_elapsed = if secs >= 0 {
+            secs / 86400
+        } else {
+            (secs - 86399) / 86400 // floor division for negative
+        };
+        let dow = ((days_elapsed % 7 + 4) % 7 + 7) % 7; // 0=Mon .. 6=Sun
+        let dow_frac = dow as f64;
+
+        // Approximate month (good enough for seasonal periodicity).
+        // day_of_year is approximate since we skip leap-year logic.
+        let day_of_year = ((days_elapsed % 365) + 365) % 365;
+        let month_frac = day_of_year as f64 / 30.5;
+
+        // --- Positional component (resolution-dependent) ---
+        let position = match resolution {
+            TimeResolution::Second => timestamp,
+            TimeResolution::Minute => timestamp / 60.0,
+            TimeResolution::Hour => timestamp / 3600.0,
+            TimeResolution::Day => timestamp / 86400.0,
+        };
+
+        // --- Circular encoding (sin/cos interpolation between two random orthogonal vectors) ---
+        let encode_circular = |value: f64, period: f64, base: &Vector, ortho: &Vector| -> Vector {
+            let normalized = (value % period) / period;
+            let angle = normalized * std::f64::consts::PI * 2.0;
+            let cos_a = angle.cos();
+            let sin_a = angle.sin();
+            let data: Vec<i8> = (0..dim)
+                .map(|i| {
+                    let v = base.data()[i] as f64 * cos_a + ortho.data()[i] as f64 * sin_a;
+                    if v > 0.0 {
+                        1
+                    } else if v < 0.0 {
+                        -1
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            Vector::from_data(data)
+        };
+
+        // Role vectors — names match Python exactly for cross-language determinism.
+        let role_hour = self.vector_manager.get_vector("__time_role_hour__");
+        let role_dow = self.vector_manager.get_vector("__time_role_dow__");
+        let role_month = self.vector_manager.get_vector("__time_role_month__");
+        let role_pos = self.vector_manager.get_vector("__time_role_position__");
+
+        // Per-component base/ortho vectors (seeded from the role name for determinism)
+        let base_hour = self.vector_manager.get_vector("__time_base_hour__");
+        let ortho_hour = self.vector_manager.get_vector("__time_ortho_hour__");
+        let base_dow = self.vector_manager.get_vector("__time_base_dow__");
+        let ortho_dow = self.vector_manager.get_vector("__time_ortho_dow__");
+        let base_month = self.vector_manager.get_vector("__time_base_month__");
+        let ortho_month = self.vector_manager.get_vector("__time_ortho_month__");
+
+        let hour_vec = encode_circular(hour_frac, 24.0, &base_hour, &ortho_hour);
+        let dow_vec = encode_circular(dow_frac, 7.0, &base_dow, &ortho_dow);
+        let month_vec = encode_circular(month_frac, 12.0, &base_month, &ortho_month);
+        // Positional: transformer-style sin/cos at multiple frequencies
+        let pos_vec = self.encode_scalar_positional(position, 10000.0);
+
+        // Bind each component vector with its role, sum, then threshold to bipolar
+        let mut sums = vec![0.0f64; dim];
+        for (role, comp) in [
+            (&role_hour, &hour_vec),
+            (&role_dow, &dow_vec),
+            (&role_month, &month_vec),
+            (&role_pos, &pos_vec),
+        ] {
+            for i in 0..dim {
+                sums[i] += role.data()[i] as f64 * comp.data()[i] as f64;
+            }
+        }
+
+        Vector::from_data(
+            sums.iter()
+                .map(|&s| {
+                    if s > 0.0 {
+                        1
+                    } else if s < 0.0 {
+                        -1
+                    } else {
+                        0
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// Transformer-style positional encoding.
@@ -1012,6 +1120,129 @@ mod tests {
         assert!(
             sim > 0.9,
             "Expected high similarity for same items in different order, got {}",
+            sim
+        );
+    }
+
+    // =========================================================================
+    // TimeFloat Encoding Tests
+    // =========================================================================
+
+    #[test]
+    fn test_time_same_hour_high_similarity() {
+        use crate::walkable::ScalarValue;
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        // Two timestamps exactly 1 week apart have the same hour and day-of-week.
+        // The circular components should produce high similarity.
+        let ts_base = 1_700_000_000.0f64; // arbitrary monday-morning-ish
+        let ts_week_later = ts_base + 7.0 * 86400.0;
+
+        let v1 = encoder.encode_scalar_value(
+            &ScalarValue::time(ts_base),
+            None,
+        );
+        let v2 = encoder.encode_scalar_value(
+            &ScalarValue::time(ts_week_later),
+            None,
+        );
+
+        let sim = Similarity::cosine(&v1, &v2);
+        // Same circular components (hour+dow+month ≈ same), only positional differs.
+        // Expect meaningful similarity.
+        assert!(
+            sim > 0.3,
+            "Expected >0.3 similarity for timestamps 1 week apart (same circular components), got {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_time_positional_discrimination() {
+        use crate::walkable::ScalarValue;
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        let base = 1_700_000_000.0f64;
+        let one_hour_later = base + 3600.0;
+        let twelve_hours_later = base + 43200.0;
+
+        let v_base = encoder.encode_scalar_value(&ScalarValue::time(base), None);
+        let v_1h = encoder.encode_scalar_value(&ScalarValue::time(one_hour_later), None);
+        let v_12h = encoder.encode_scalar_value(&ScalarValue::time(twelve_hours_later), None);
+
+        let sim_1h = Similarity::cosine(&v_base, &v_1h);
+        let sim_12h = Similarity::cosine(&v_base, &v_12h);
+
+        // 1 hour apart should be more similar than 12 hours apart
+        assert!(
+            sim_1h > sim_12h,
+            "Expected 1h-apart more similar than 12h-apart, got {} vs {}",
+            sim_1h,
+            sim_12h
+        );
+    }
+
+    #[test]
+    fn test_time_resolution_matters() {
+        use crate::walkable::{ScalarValue, TimeResolution};
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        let ts = 1_700_000_000.0f64;
+
+        let v_second = encoder.encode_scalar_value(
+            &ScalarValue::TimeFloat { value: ts, resolution: TimeResolution::Second },
+            None,
+        );
+        let v_day = encoder.encode_scalar_value(
+            &ScalarValue::TimeFloat { value: ts, resolution: TimeResolution::Day },
+            None,
+        );
+
+        // Second and Day resolution produce different positional components
+        let sim = Similarity::cosine(&v_second, &v_day);
+        assert!(
+            sim < 0.99,
+            "Expected Second vs Day resolution to differ, got similarity {}",
+            sim
+        );
+    }
+
+    #[test]
+    fn test_time_scalar_ref_encodes() {
+        use crate::walkable::ScalarRef;
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        // ScalarRef::time should produce a valid vector
+        let v = encoder.encode_scalar_ref(ScalarRef::time(1_700_000_000.0), None);
+        assert_eq!(v.dimensions(), 4096);
+        assert!(v.nnz() > 0, "TimeFloat vector should be non-zero");
+    }
+
+    #[test]
+    fn test_time_midnight_epoch_vs_midnight_year2() {
+        // Midnight on Jan 1 1970 (epoch) vs Jan 1 1971 (year 2):
+        // Both are midnight, both are Thursday, roughly same month position.
+        // Circular components should be quite similar.
+        use crate::walkable::ScalarValue;
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        let epoch = 0.0f64;              // Jan 1 1970 00:00:00 UTC
+        let year2 = 365.0 * 86400.0;    // Jan 1 1971 00:00:00 UTC (approx)
+
+        let v_epoch = encoder.encode_scalar_value(&ScalarValue::time(epoch), None);
+        let v_year2 = encoder.encode_scalar_value(&ScalarValue::time(year2), None);
+
+        let sim = Similarity::cosine(&v_epoch, &v_year2);
+        // Same hour (0), same day-of-week (Thursday), same month-fraction (~0).
+        // Should share high circular similarity.
+        assert!(
+            sim > 0.3,
+            "Expected >0.3 for same circular components (midnight Thursday, month 0), got {}",
             sim
         );
     }

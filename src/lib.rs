@@ -35,6 +35,7 @@
 pub mod accumulator;
 pub mod encoder;
 pub mod error;
+pub mod memory;
 pub mod primitives;
 pub mod scalar;
 pub mod similarity;
@@ -46,12 +47,15 @@ pub mod walkable;
 pub use accumulator::Accumulator;
 pub use encoder::{Encoder, SequenceMode};
 pub use error::{HolonError, Result};
+pub use memory::{Engram, EngramLibrary, OnlineSubspace};
 pub use primitives::{AttendMode, GateMode, NegateMethod, Primitives, SegmentMethod};
 pub use scalar::{ScalarEncoder, ScalarMode};
 pub use similarity::{Metric, Similarity};
 pub use vector::Vector;
 pub use vector_manager::VectorManager;
-pub use walkable::{ScalarRef, ScalarValue, WalkType, Walkable, WalkableRef, WalkableValue};
+pub use walkable::{
+    ScalarRef, ScalarValue, TimeResolution, WalkType, Walkable, WalkableRef, WalkableValue,
+};
 
 /// The main Holon client - primary interface for all operations.
 ///
@@ -610,6 +614,39 @@ impl Holon {
     /// Participation ratio: effective number of active dimensions.
     pub fn accumulator_participation_ratio(&self, accumulator: &Accumulator) -> f64 {
         accumulator.participation_ratio()
+    }
+
+    // =========================================================================
+    // Memory Layer
+    // =========================================================================
+
+    /// Create an [`OnlineSubspace`] with this Holon's dimensionality.
+    ///
+    /// The subspace learns the low-dimensional manifold of "normal" vectors and
+    /// scores new vectors by their residual distance (anomaly score).
+    ///
+    /// # Example
+    /// ```rust
+    /// use holon::Holon;
+    /// let holon = Holon::new(4096);
+    /// let mut subspace = holon.create_subspace(32);
+    /// // train: subspace.update(&some_vector.to_f64());
+    /// // score: let residual = subspace.residual(&probe.to_f64());
+    /// ```
+    pub fn create_subspace(&self, k: usize) -> OnlineSubspace {
+        OnlineSubspace::new(self.dimensions, k)
+    }
+
+    /// Create an [`EngramLibrary`] keyed to this Holon's dimensionality.
+    ///
+    /// # Example
+    /// ```rust
+    /// use holon::Holon;
+    /// let holon = Holon::new(4096);
+    /// let mut library = holon.create_engram_library();
+    /// ```
+    pub fn create_engram_library(&self) -> EngramLibrary {
+        EngramLibrary::new(self.dimensions)
     }
 
     // =========================================================================

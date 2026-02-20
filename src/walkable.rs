@@ -48,6 +48,19 @@ pub enum WalkType {
     Set,
 }
 
+/// Resolution for temporal encoding — controls the positional component granularity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeResolution {
+    /// Positional unit: seconds (finest discrimination).
+    Second,
+    /// Positional unit: minutes.
+    Minute,
+    /// Positional unit: hours (default).
+    Hour,
+    /// Positional unit: days (coarsest discrimination).
+    Day,
+}
+
 /// Scalar value types for encoding.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScalarValue {
@@ -62,6 +75,10 @@ pub enum ScalarValue {
     /// Linear positional encoding: equal differences = equal similarity drops.
     /// Use for: temperatures, positions, timestamps.
     LinearFloat { value: f64, scale: f64 },
+    /// Time-aware encoding: circular (hour-of-day, day-of-week, month) + positional.
+    /// Temporally close events produce similar vectors; periodic structure preserved.
+    /// Use for: Unix timestamps, event times, log times.
+    TimeFloat { value: f64, resolution: TimeResolution },
 }
 
 impl ScalarValue {
@@ -76,6 +93,7 @@ impl ScalarValue {
             // Numeric scalars don't use atom encoding - handled specially by encoder
             ScalarValue::LogFloat { value, .. } => format!("$log:{}", value),
             ScalarValue::LinearFloat { value, .. } => format!("$linear:{}", value),
+            ScalarValue::TimeFloat { value, .. } => format!("$time:{}", value),
         }
     }
 
@@ -121,9 +139,31 @@ impl ScalarValue {
         ScalarValue::LinearFloat { value, scale }
     }
 
+    /// Create a time-aware scalar with default resolution (Hour).
+    ///
+    /// # Example
+    /// ```rust
+    /// use holon::ScalarValue;
+    /// let ts = ScalarValue::time(1_700_000_000.0);
+    /// ```
+    pub fn time(value: f64) -> Self {
+        ScalarValue::TimeFloat {
+            value,
+            resolution: TimeResolution::Hour,
+        }
+    }
+
+    /// Create a time-aware scalar with explicit resolution.
+    pub fn time_with_resolution(value: f64, resolution: TimeResolution) -> Self {
+        ScalarValue::TimeFloat { value, resolution }
+    }
+
     /// Check if this is a numeric scalar requiring special encoding.
     pub fn is_numeric_scalar(&self) -> bool {
-        matches!(self, ScalarValue::LogFloat { .. } | ScalarValue::LinearFloat { .. })
+        matches!(
+            self,
+            ScalarValue::LogFloat { .. } | ScalarValue::LinearFloat { .. } | ScalarValue::TimeFloat { .. }
+        )
     }
 }
 
@@ -143,6 +183,8 @@ pub enum ScalarRef<'a> {
     LogFloat { value: f64, scale: f64 },
     /// Linear-scale encoding reference.
     LinearFloat { value: f64, scale: f64 },
+    /// Time-aware encoding reference.
+    TimeFloat { value: f64, resolution: TimeResolution },
 }
 
 impl<'a> ScalarRef<'a> {
@@ -159,6 +201,7 @@ impl<'a> ScalarRef<'a> {
             // Numeric scalars don't use atom encoding
             ScalarRef::LogFloat { value, .. } => format!("$log:{}", value),
             ScalarRef::LinearFloat { value, .. } => format!("$linear:{}", value),
+            ScalarRef::TimeFloat { value, .. } => format!("$time:{}", value),
         }
     }
 
@@ -177,6 +220,10 @@ impl<'a> ScalarRef<'a> {
             ScalarRef::LinearFloat { value, scale } => ScalarValue::LinearFloat {
                 value: *value,
                 scale: *scale,
+            },
+            ScalarRef::TimeFloat { value, resolution } => ScalarValue::TimeFloat {
+                value: *value,
+                resolution: *resolution,
             },
         }
     }
@@ -211,11 +258,32 @@ impl<'a> ScalarRef<'a> {
         ScalarRef::LinearFloat { value, scale }
     }
 
+    /// Create a time-aware reference with default resolution (Hour).
+    ///
+    /// # Example
+    /// ```rust
+    /// use holon::ScalarRef;
+    /// let ts = ScalarRef::time(1_700_000_000.0);
+    /// ```
+    #[inline]
+    pub fn time(value: f64) -> Self {
+        ScalarRef::TimeFloat {
+            value,
+            resolution: TimeResolution::Hour,
+        }
+    }
+
+    /// Create a time-aware reference with explicit resolution.
+    #[inline]
+    pub fn time_with_resolution(value: f64, resolution: TimeResolution) -> Self {
+        ScalarRef::TimeFloat { value, resolution }
+    }
+
     /// Check if this is a numeric scalar requiring special encoding.
     pub fn is_numeric_scalar(&self) -> bool {
         matches!(
             self,
-            ScalarRef::LogFloat { .. } | ScalarRef::LinearFloat { .. }
+            ScalarRef::LogFloat { .. } | ScalarRef::LinearFloat { .. } | ScalarRef::TimeFloat { .. }
         )
     }
 }
@@ -267,6 +335,24 @@ impl<'a> WalkableRef<'a> {
     #[inline]
     pub fn nested(value: WalkableValue) -> Self {
         WalkableRef::Nested(value)
+    }
+
+    /// Create a time-aware scalar reference with default resolution (Hour).
+    ///
+    /// Encodes circular structure (hour-of-day, day-of-week, month) plus
+    /// a positional component for absolute discrimination.
+    #[inline]
+    pub fn time(value: f64) -> Self {
+        WalkableRef::Scalar(ScalarRef::TimeFloat {
+            value,
+            resolution: TimeResolution::Hour,
+        })
+    }
+
+    /// Create a time-aware scalar reference with explicit resolution.
+    #[inline]
+    pub fn time_with_resolution(value: f64, resolution: TimeResolution) -> Self {
+        WalkableRef::Scalar(ScalarRef::TimeFloat { value, resolution })
     }
 }
 
@@ -384,6 +470,7 @@ pub trait Walkable {
             ScalarValue::Null => ScalarRef::Null,
             ScalarValue::LogFloat { value, scale } => ScalarRef::LogFloat { value, scale },
             ScalarValue::LinearFloat { value, scale } => ScalarRef::LinearFloat { value, scale },
+            ScalarValue::TimeFloat { value, resolution } => ScalarRef::TimeFloat { value, resolution },
         }
     }
 
@@ -455,6 +542,12 @@ fn walkable_value_to_ref(value: &WalkableValue) -> WalkableRef<'_> {
                 WalkableRef::Scalar(ScalarRef::LinearFloat {
                     value: *value,
                     scale: *scale,
+                })
+            }
+            ScalarValue::TimeFloat { value, resolution } => {
+                WalkableRef::Scalar(ScalarRef::TimeFloat {
+                    value: *value,
+                    resolution: *resolution,
                 })
             }
         },

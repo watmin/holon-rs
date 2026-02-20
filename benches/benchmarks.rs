@@ -1,6 +1,7 @@
 //! Benchmarks for Holon operations.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use holon::memory::{EngramLibrary, OnlineSubspace};
 use holon::{Holon, ScalarMode, ScalarValue, WalkType, Walkable, WalkableRef, WalkableValue};
 
 // =============================================================================
@@ -235,6 +236,81 @@ fn benchmark_json_string_building(c: &mut Criterion) {
     });
 }
 
+// =============================================================================
+// Memory Layer Benchmarks
+// =============================================================================
+
+fn benchmark_subspace_update(c: &mut Criterion) {
+    let holon = Holon::new(4096);
+    let mut subspace = holon.create_subspace(32);
+
+    // Pre-train so we measure steady-state performance, not initialization
+    let warmup_vec: Vec<f64> = (0..4096).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+    for _ in 0..50 {
+        subspace.update(&warmup_vec);
+    }
+
+    // Bench update with a varying vector
+    let bench_vec: Vec<f64> = (0..4096).map(|i| (i as f64).sin()).collect();
+    c.bench_function("subspace_update", |b| {
+        b.iter(|| subspace.update(black_box(&bench_vec)))
+    });
+}
+
+fn benchmark_subspace_residual(c: &mut Criterion) {
+    let holon = Holon::new(4096);
+    let mut subspace = holon.create_subspace(32);
+
+    // Train
+    for i in 0..200 {
+        let v: Vec<f64> = (0..4096).map(|j| ((i * j) as f64).sin()).collect();
+        subspace.update(&v);
+    }
+
+    let probe: Vec<f64> = (0..4096).map(|i| (i as f64 * 0.1).cos()).collect();
+    c.bench_function("subspace_residual", |b| {
+        b.iter(|| subspace.residual(black_box(&probe)))
+    });
+}
+
+fn benchmark_engram_match(c: &mut Criterion) {
+    let dim = 4096;
+
+    // Create 10 engrams from different distributions
+    let mut library = EngramLibrary::new(dim);
+    for pattern in 0..10usize {
+        let mut sub = OnlineSubspace::new(dim, 16);
+        for i in 0..100usize {
+            let v: Vec<f64> = (0..dim)
+                .map(|j| ((pattern * 100 + i + j) as f64 * 0.01).sin())
+                .collect();
+            sub.update(&v);
+        }
+        library.add(&format!("pattern_{}", pattern), &sub, None, Default::default());
+    }
+
+    let probe: Vec<f64> = (0..dim).map(|i| (i as f64 * 0.01).sin()).collect();
+    c.bench_function("engram_match_10", |b| {
+        b.iter(|| library.match_vec(black_box(&probe), 3, 10))
+    });
+}
+
+// =============================================================================
+// TimeScale Encoding Benchmarks
+// =============================================================================
+
+fn benchmark_encode_time(c: &mut Criterion) {
+    let holon = Holon::new(4096);
+
+    c.bench_function("encode_time", |b| {
+        b.iter(|| {
+            holon.encode_walkable_value(&holon::WalkableValue::Scalar(holon::ScalarValue::time(
+                black_box(1_700_000_000.0),
+            )))
+        })
+    });
+}
+
 criterion_group!(
     benches,
     benchmark_vector_generation,
@@ -247,6 +323,10 @@ criterion_group!(
     benchmark_encode_walkable,
     benchmark_walkable_vs_json,
     benchmark_json_string_building,
+    benchmark_subspace_update,
+    benchmark_subspace_residual,
+    benchmark_engram_match,
+    benchmark_encode_time,
 );
 
 criterion_main!(benches);
