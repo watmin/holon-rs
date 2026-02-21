@@ -19,7 +19,6 @@ struct Packet {
     dst_port: u16,
     protocol: String,
     payload_size: usize,
-    label: String,
 }
 
 /// Generate normal traffic mix
@@ -36,7 +35,6 @@ fn generate_normal_traffic(count: usize, seed: u64) -> Vec<Packet> {
                 dst_port: 443,
                 protocol: "TCP".to_string(),
                 payload_size: (rng.gen::<f64>() * 500.0) as usize,
-                label: "normal".to_string(),
             });
         } else if r < 0.8 {
             // HTTP
@@ -45,7 +43,6 @@ fn generate_normal_traffic(count: usize, seed: u64) -> Vec<Packet> {
                 dst_port: 80,
                 protocol: "TCP".to_string(),
                 payload_size: (rng.gen::<f64>() * 800.0) as usize,
-                label: "normal".to_string(),
             });
         } else {
             // Other
@@ -54,7 +51,6 @@ fn generate_normal_traffic(count: usize, seed: u64) -> Vec<Packet> {
                 dst_port: rng.gen_range(1024..49151),
                 protocol: "TCP".to_string(),
                 payload_size: (rng.gen::<f64>() * 300.0) as usize,
-                label: "normal".to_string(),
             });
         }
     }
@@ -70,7 +66,6 @@ fn generate_dns_reflection(count: usize, seed: u64) -> Vec<Packet> {
             dst_port: rng.gen_range(49152..65535),
             protocol: "UDP".to_string(),
             payload_size: (rng.gen::<f64>() * 4000.0) as usize,
-            label: "dns_reflection".to_string(),
         })
         .collect()
 }
@@ -84,7 +79,6 @@ fn generate_ntp_amplification(count: usize, seed: u64) -> Vec<Packet> {
             dst_port: rng.gen_range(49152..65535),
             protocol: "UDP".to_string(),
             payload_size: (rng.gen::<f64>() * 5000.0) as usize,
-            label: "ntp_amplification".to_string(),
         })
         .collect()
 }
@@ -98,7 +92,6 @@ fn generate_ssdp_amplification(count: usize, seed: u64) -> Vec<Packet> {
             dst_port: rng.gen_range(49152..65535),
             protocol: "UDP".to_string(),
             payload_size: (rng.gen::<f64>() * 3000.0) as usize,
-            label: "ssdp_amplification".to_string(),
         })
         .collect()
 }
@@ -112,7 +105,6 @@ fn generate_chargen_amplification(count: usize, seed: u64) -> Vec<Packet> {
             dst_port: rng.gen_range(49152..65535),
             protocol: "UDP".to_string(),
             payload_size: (rng.gen::<f64>() * 6000.0) as usize,
-            label: "chargen_amplification".to_string(),
         })
         .collect()
 }

@@ -1,7 +1,7 @@
 //! Online subspace learning via CCIPCA (Candid Covariance-free Incremental PCA).
 //!
-//! Learns the low-dimensional manifold occupied by "familiar" vectors, then
-//! scores new vectors by their residual distance from that manifold.
+//! Uses `ndarray` for vectorized dot products and element-wise operations,
+//! giving significant speedups on the per-observation scoring and update steps.
 //!
 //! # Algorithm: Weng et al., 2003
 //!
@@ -29,6 +29,7 @@
 //! }
 //! ```
 
+use ndarray::{Array1, Array2, ArrayView1};
 use serde::{Deserialize, Serialize};
 
 /// Serializable snapshot of an OnlineSubspace for persistence and distribution.
@@ -54,6 +55,10 @@ pub struct SubspaceSnapshot {
 /// `vec.to_f64()` before passing in — this keeps the memory layer
 /// decoupled from the VSA vector type.
 ///
+/// Internally stores the component matrix as `ndarray::Array2<f64>` (k × dim)
+/// so that dot products, projections, and deflations compile down to
+/// vectorized (SIMD) loops.
+///
 /// [`Vector`]: crate::vector::Vector
 #[derive(Clone, Debug)]
 pub struct OnlineSubspace {
@@ -64,9 +69,9 @@ pub struct OnlineSubspace {
     sigma_mult: f64,
     reorth_interval: usize,
 
-    mean: Vec<f64>,
-    /// Row-major flat storage: components[i * dim .. (i+1) * dim] = component i.
-    components: Vec<f64>,
+    mean: Array1<f64>,
+    /// Row-major: row i = component i (shape k × dim).
+    components: Array2<f64>,
     n: usize,
 
     res_ema: f64,
@@ -104,8 +109,8 @@ impl OnlineSubspace {
             ema_alpha,
             sigma_mult,
             reorth_interval,
-            mean: vec![0.0; dim],
-            components: vec![0.0; k * dim],
+            mean: Array1::zeros(dim),
+            components: Array2::zeros((k, dim)),
             n: 0,
             res_ema: 0.0,
             res_var_ema: 0.0,
@@ -175,6 +180,8 @@ impl OnlineSubspace {
             x.len()
         );
 
+        let x_view = ArrayView1::from(x);
+
         // Compute residual BEFORE updating (matches test-time residual())
         let res = if self.initialized {
             self.residual(x)
@@ -186,21 +193,16 @@ impl OnlineSubspace {
         let n = self.n as f64;
         let amn = self.amnesia;
 
-        // Update running mean
-        let n_minus_1_over_n = (n - 1.0) / n;
-        let one_over_n = 1.0 / n;
-        for (i, m) in self.mean.iter_mut().enumerate().take(self.dim) {
-            *m = n_minus_1_over_n * *m + one_over_n * x[i];
-        }
+        // Update running mean: mean = ((n-1)/n) * mean + (1/n) * x
+        self.mean *= (n - 1.0) / n;
+        self.mean.scaled_add(1.0 / n, &x_view);
 
         // Center
-        let mut x_c: Vec<f64> = x.iter().zip(self.mean.iter()).map(|(xi, mi)| xi - mi).collect();
+        let mut x_c = &x_view - &self.mean;
 
         if !self.initialized && self.n == 1 {
-            // Seed first component with the first centered observation
-            self.components[..self.dim].copy_from_slice(&x_c[..self.dim]);
+            self.components.row_mut(0).assign(&x_c);
             self.initialized = true;
-            // Update threshold EMA with this initial residual
             self.update_threshold_ema(res);
             return res;
         }
@@ -210,38 +212,27 @@ impl OnlineSubspace {
             let v_norm = self.component_norm(i);
 
             if v_norm < 1e-10 {
-                if norm(&x_c) > 1e-10 {
+                if x_c.dot(&x_c).sqrt() > 1e-10 {
                     let scale = (1.0 + amn) / n;
-                    let base = i * self.dim;
-                    for (j, c) in self.components[base..base + self.dim].iter_mut().enumerate() {
-                        *c = x_c[j] * scale;
-                    }
+                    self.components.row_mut(i).assign(&(&x_c * scale));
                 }
             } else {
-                // u = v / v_norm
-                let base = i * self.dim;
-                let x_c_proj: f64 = (0..self.dim)
-                    .map(|j| x_c[j] * self.components[base + j] / v_norm)
-                    .sum();
+                let x_c_proj: f64 = x_c.dot(&self.components.row(i)) / v_norm;
 
-                // Weng et al. CCIPCA update
                 let decay = (n - 1.0 - amn) / n;
                 let grow = (1.0 + amn) / n * x_c_proj;
-                for (j, c) in self.components[base..base + self.dim].iter_mut().enumerate() {
-                    *c = decay * *c + grow * x_c[j];
-                }
+                self.components
+                    .row_mut(i)
+                    .zip_mut_with(&x_c, |c, &xc| {
+                        *c = decay * *c + grow * xc;
+                    });
             }
 
             // Deflate x_c for next component
             let v_new_norm = self.component_norm(i);
             if v_new_norm > 1e-10 {
-                let base = i * self.dim;
-                let proj: f64 = (0..self.dim)
-                    .map(|j| x_c[j] * self.components[base + j] / v_new_norm)
-                    .sum();
-                for (j, xc) in x_c.iter_mut().enumerate().take(self.dim) {
-                    *xc -= proj * self.components[base + j] / v_new_norm;
-                }
+                let proj: f64 = x_c.dot(&self.components.row(i)) / v_new_norm;
+                x_c.scaled_add(-proj / v_new_norm, &self.components.row(i));
             }
         }
 
@@ -268,39 +259,33 @@ impl OnlineSubspace {
             x.len()
         );
 
-        let mut x_c: Vec<f64> = x.iter().zip(self.mean.iter()).map(|(xi, mi)| xi - mi).collect();
+        let x_view = ArrayView1::from(x);
+        let mut x_c = &x_view - &self.mean;
 
         for i in 0..self.k {
             let v_norm = self.component_norm(i);
             if v_norm < 1e-10 {
                 continue;
             }
-            let base = i * self.dim;
-            let proj: f64 = (0..self.dim)
-                .map(|j| x_c[j] * self.components[base + j] / v_norm)
-                .sum();
-            for (j, xc) in x_c.iter_mut().enumerate().take(self.dim) {
-                *xc -= proj * self.components[base + j] / v_norm;
-            }
+            let proj: f64 = x_c.dot(&self.components.row(i)) / v_norm;
+            x_c.scaled_add(-proj / v_norm, &self.components.row(i));
         }
 
-        norm(&x_c)
+        x_c.dot(&x_c).sqrt()
     }
 
     /// Project onto learned subspace, returning k coefficients.
     pub fn project(&self, x: &[f64]) -> Vec<f64> {
         assert_eq!(x.len(), self.dim);
-        let x_c: Vec<f64> = x.iter().zip(self.mean.iter()).map(|(xi, mi)| xi - mi).collect();
+        let x_view = ArrayView1::from(x);
+        let x_c = &x_view - &self.mean;
         (0..self.k)
             .map(|i| {
                 let v_norm = self.component_norm(i);
                 if v_norm < 1e-10 {
                     return 0.0;
                 }
-                let base = i * self.dim;
-                (0..self.dim)
-                    .map(|j| x_c[j] * self.components[base + j] / v_norm)
-                    .sum()
+                x_c.dot(&self.components.row(i)) / v_norm
             })
             .collect()
     }
@@ -315,12 +300,9 @@ impl OnlineSubspace {
             if v_norm < 1e-10 {
                 continue;
             }
-            let base = i * self.dim;
-            for (j, r) in result.iter_mut().enumerate().take(self.dim) {
-                *r += coeff * self.components[base + j] / v_norm;
-            }
+            result.scaled_add(coeff / v_norm, &self.components.row(i));
         }
-        result
+        result.to_vec()
     }
 
     /// Extract the anomalous (out-of-subspace) component: `x - reconstruct(x)`.
@@ -344,8 +326,12 @@ impl OnlineSubspace {
             sigma_mult: self.sigma_mult,
             reorth_interval: self.reorth_interval,
             n: self.n,
-            mean: self.mean.clone(),
-            components: self.components.clone(),
+            mean: self.mean.to_vec(),
+            components: self
+                .components
+                .as_slice()
+                .expect("components is contiguous")
+                .to_vec(),
             res_ema: self.res_ema,
             res_var_ema: self.res_var_ema,
         }
@@ -361,8 +347,9 @@ impl OnlineSubspace {
             sigma_mult: snap.sigma_mult,
             reorth_interval: snap.reorth_interval,
             n: snap.n,
-            mean: snap.mean,
-            components: snap.components,
+            mean: Array1::from_vec(snap.mean),
+            components: Array2::from_shape_vec((snap.k, snap.dim), snap.components)
+                .expect("components length must equal k × dim"),
             res_ema: snap.res_ema,
             res_var_ema: snap.res_var_ema,
             initialized: snap.n > 0,
@@ -373,8 +360,8 @@ impl OnlineSubspace {
 
     #[inline]
     fn component_norm(&self, i: usize) -> f64 {
-        let base = i * self.dim;
-        norm(&self.components[base..base + self.dim])
+        let row = self.components.row(i);
+        row.dot(&row).sqrt()
     }
 
     fn update_threshold_ema(&mut self, res: f64) {
@@ -395,31 +382,23 @@ impl OnlineSubspace {
             if norms[i] < 1e-10 {
                 continue;
             }
-            for (j, &nj) in norms.iter().enumerate().take(i) {
-                if nj < 1e-10 {
+            for j in 0..i {
+                if norms[j] < 1e-10 {
                     continue;
                 }
-                // proj = dot(component_i, unit_j)
-                let base_i = i * self.dim;
-                let base_j = j * self.dim;
-                let proj: f64 = (0..self.dim)
-                    .map(|d| self.components[base_i + d] * self.components[base_j + d] / nj)
-                    .sum();
-                // component_i -= proj * unit_j
-                for d in 0..self.dim {
-                    let sub = proj * self.components[base_j + d] / nj;
-                    self.components[base_i + d] -= sub;
-                }
+                // Clone row j to avoid simultaneous borrow of rows i and j.
+                let unit_j = self.components.row(j).to_owned() / norms[j];
+                let proj: f64 = self.components.row(i).dot(&unit_j);
+                self.components.row_mut(i).scaled_add(-proj, &unit_j);
             }
 
             // Restore original norm (eigenvalue estimate)
             let new_norm = self.component_norm(i);
             if new_norm > 1e-10 {
                 let scale = norms[i] / new_norm;
-                let base = i * self.dim;
-                for d in 0..self.dim {
-                    self.components[base + d] *= scale;
-                }
+                self.components
+                    .row_mut(i)
+                    .mapv_inplace(|v| v * scale);
             }
         }
     }
@@ -440,7 +419,6 @@ mod tests {
 
     /// Generate vectors from a low-rank distribution (span of 3 basis vectors).
     fn low_rank_sample(rng_state: &mut u64, dim: usize) -> Vec<f64> {
-        // Simple LCG for deterministic but varied samples
         let basis: Vec<Vec<f64>> = (0..3)
             .map(|b| {
                 (0..dim)
@@ -501,13 +479,11 @@ mod tests {
         let mut sub = OnlineSubspace::with_params(dim, 8, 2.0, 0.01, 2.5, 500);
         let mut rng = 42u64;
 
-        // Train on 200 low-rank samples
         for _ in 0..200 {
             let v = low_rank_sample(&mut rng, dim);
             sub.update(&v);
         }
 
-        // In-distribution: should mostly be below threshold
         let mut above = 0;
         for _ in 0..20 {
             let v = low_rank_sample(&mut rng, dim);
@@ -524,13 +500,11 @@ mod tests {
         let mut sub = OnlineSubspace::with_params(dim, 8, 2.0, 0.01, 2.5, 500);
         let mut rng = 42u64;
 
-        // Train on low-rank samples (only 3 dimensions active)
         for _ in 0..300 {
             let v = low_rank_sample(&mut rng, dim);
             sub.update(&v);
         }
 
-        // Out-of-distribution: random full-rank vectors should exceed threshold
         let mut above = 0;
         let mut rng2 = 999u64;
         for _ in 0..10 {
@@ -556,7 +530,6 @@ mod tests {
         let snap = sub.snapshot();
         let restored = OnlineSubspace::from_snapshot(snap);
 
-        // Both should produce identical residuals
         let mut rng2 = 1234u64;
         for _ in 0..10 {
             let v = low_rank_sample(&mut rng2, dim);
@@ -586,7 +559,6 @@ mod tests {
         let rec = sub.reconstruct(&v);
         let anom = sub.anomalous_component(&v);
 
-        // x = reconstruct(x) + anomalous_component(x)
         for i in 0..dim {
             assert!(
                 (v[i] - rec[i] - anom[i]).abs() < 1e-10,
@@ -601,7 +573,6 @@ mod tests {
         let mut sub = OnlineSubspace::with_params(dim, 4, 2.0, 0.01, 3.5, 0);
         let mut rng = 42u64;
 
-        // After minimal training, explained ratio is 0
         assert_eq!(sub.explained_ratio(), 0.0);
 
         for _ in 0..300 {
@@ -609,7 +580,6 @@ mod tests {
             sub.update(&v);
         }
 
-        // After substantial training on low-rank data, should explain most variance
         assert!(
             sub.explained_ratio() > 0.5,
             "Expected explained_ratio > 0.5 after training, got {}",

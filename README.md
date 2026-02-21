@@ -42,7 +42,7 @@ use holon::kernel::{Encoder, VectorManager, Primitives, Similarity};
 use holon::memory::OnlineSubspace;
 
 let vm = VectorManager::new(4096);
-let enc = Encoder::new(vm.clone());
+let enc = Encoder::new(vm);  // vm uses Arc internally; clone to share
 
 let a = enc.encode_json(r#"{"role": "admin"}"#)?;
 let b = enc.encode_json(r#"{"role": "user"}"#)?;

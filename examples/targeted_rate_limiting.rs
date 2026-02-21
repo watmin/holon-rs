@@ -17,7 +17,6 @@ struct Packet {
     dst_port: u16,
     protocol: String,
     payload_size: usize,
-    label: String,
 }
 
 fn generate_normal_traffic(count: usize, seed: u64, include_dns: bool) -> Vec<Packet> {
@@ -32,7 +31,6 @@ fn generate_normal_traffic(count: usize, seed: u64, include_dns: bool) -> Vec<Pa
                 dst_port: 443,
                 protocol: "TCP".to_string(),
                 payload_size: (rng.gen::<f64>() * 500.0) as usize,
-                label: "normal".to_string(),
             });
         } else if r < 0.60 {
             packets.push(Packet {
@@ -40,7 +38,6 @@ fn generate_normal_traffic(count: usize, seed: u64, include_dns: bool) -> Vec<Pa
                 dst_port: 80,
                 protocol: "TCP".to_string(),
                 payload_size: (rng.gen::<f64>() * 800.0) as usize,
-                label: "normal".to_string(),
             });
         } else if r < 0.80 && include_dns {
             // Legitimate DNS query: src=ephemeral, dst=53
@@ -49,7 +46,6 @@ fn generate_normal_traffic(count: usize, seed: u64, include_dns: bool) -> Vec<Pa
                 dst_port: 53,
                 protocol: "UDP".to_string(),
                 payload_size: (rng.gen::<f64>() * 80.0) as usize,
-                label: "normal".to_string(),
             });
         } else {
             packets.push(Packet {
@@ -57,7 +53,6 @@ fn generate_normal_traffic(count: usize, seed: u64, include_dns: bool) -> Vec<Pa
                 dst_port: rng.gen_range(1024..49151),
                 protocol: "TCP".to_string(),
                 payload_size: (rng.gen::<f64>() * 300.0) as usize,
-                label: "normal".to_string(),
             });
         }
     }
@@ -72,7 +67,6 @@ fn generate_dns_reflection(count: usize, seed: u64) -> Vec<Packet> {
             dst_port: rng.gen_range(49152..65535),
             protocol: "UDP".to_string(),
             payload_size: (rng.gen::<f64>() * 4000.0) as usize,
-            label: "dns_reflection".to_string(),
         })
         .collect()
 }
@@ -85,7 +79,6 @@ fn generate_legit_dns(count: usize, seed: u64) -> Vec<Packet> {
             dst_port: 53, // Going TO DNS server
             protocol: "UDP".to_string(),
             payload_size: (rng.gen::<f64>() * 80.0) as usize,
-            label: "legitimate_dns".to_string(),
         })
         .collect()
 }

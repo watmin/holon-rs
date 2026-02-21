@@ -19,7 +19,7 @@
 //! use holon::memory::OnlineSubspace;
 //!
 //! let vm = VectorManager::new(4096);
-//! let enc = Encoder::new(vm.clone());
+//! let enc = Encoder::new(vm);
 //!
 //! let a = enc.encode_json(r#"{"role": "admin"}"#).unwrap();
 //! let b = enc.encode_json(r#"{"role": "user"}"#).unwrap();
@@ -578,7 +578,7 @@ mod tests {
         use crate::kernel::{Encoder, VectorManager, Primitives, Similarity};
 
         let vm = VectorManager::new(4096);
-        let enc = Encoder::new(vm.clone());
+        let enc = Encoder::new(vm);
 
         let a = enc.encode_json(r#"{"role": "admin"}"#).unwrap();
         let b = enc.encode_json(r#"{"role": "user"}"#).unwrap();

@@ -38,6 +38,9 @@ serde_json = "1.0"
 # Error handling
 thiserror = "1.0"
 
+# N-dimensional arrays for vectorized linear algebra (CCIPCA, accumulators)
+ndarray = "0.17"
+
 # Optional: SIMD-accelerated similarity (enable with --features simd)
 simsimd = { version = "6.5", optional = true }
 

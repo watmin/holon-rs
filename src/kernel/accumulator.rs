@@ -14,16 +14,21 @@
 //! This matters for anomaly detection: common patterns should dominate
 //! the baseline, so rare anomalies have low similarity.
 
+use ndarray::Array1;
+
 use super::vector::Vector;
 
 /// A frequency-preserving accumulator for streaming data.
 ///
 /// Unlike bundling, accumulation preserves frequency information:
 /// patterns seen many times contribute proportionally more.
+///
+/// Internally uses `ndarray::Array1<f64>` so that decay, merge, and
+/// norm operations compile down to vectorized (SIMD) loops.
 #[derive(Clone, Debug)]
 pub struct Accumulator {
     /// Running sum of all vectors (not thresholded)
-    sums: Vec<f64>,
+    sums: Array1<f64>,
     /// Number of examples accumulated
     count: usize,
 }
@@ -32,7 +37,7 @@ impl Accumulator {
     /// Create a new empty accumulator.
     pub fn new(dimensions: usize) -> Self {
         Self {
-            sums: vec![0.0; dimensions],
+            sums: Array1::zeros(dimensions),
             count: 0,
         }
     }
@@ -58,8 +63,8 @@ impl Accumulator {
             "Dimension mismatch in accumulator"
         );
 
-        for (i, &v) in example.data().iter().enumerate() {
-            self.sums[i] += v as f64;
+        for (s, &v) in self.sums.iter_mut().zip(example.data().iter()) {
+            *s += v as f64;
         }
         self.count += 1;
     }
@@ -72,8 +77,8 @@ impl Accumulator {
             "Dimension mismatch in accumulator"
         );
 
-        for (i, &v) in example.data().iter().enumerate() {
-            self.sums[i] += (v as f64) * weight;
+        for (s, &v) in self.sums.iter_mut().zip(example.data().iter()) {
+            *s += (v as f64) * weight;
         }
         self.count += 1;
     }
@@ -82,13 +87,12 @@ impl Accumulator {
     ///
     /// Returns a continuous f64 vector suitable for cosine similarity.
     pub fn normalize(&self) -> Vector {
-        let norm: f64 = self.sums.iter().map(|&x| x * x).sum::<f64>().sqrt();
+        let norm = self.sums.dot(&self.sums).sqrt();
 
         if norm < 1e-10 {
             return Vector::zeros(self.dimensions());
         }
 
-        // Return as bipolar by thresholding the normalized values
         let data: Vec<i8> = self
             .sums
             .iter()
@@ -109,12 +113,14 @@ impl Accumulator {
 
     /// Get the raw f64 sums (for advanced use).
     pub fn raw_sums(&self) -> &[f64] {
-        &self.sums
+        self.sums
+            .as_slice()
+            .expect("accumulator array is contiguous")
     }
 
     /// Normalize as f64 vector (preserving continuous values).
     pub fn normalize_f64(&self) -> Vec<f64> {
-        let norm: f64 = self.sums.iter().map(|&x| x * x).sum::<f64>().sqrt();
+        let norm = self.sums.dot(&self.sums).sqrt();
 
         if norm < 1e-10 {
             return vec![0.0; self.dimensions()];
@@ -155,9 +161,7 @@ impl Accumulator {
             "Dimension mismatch in accumulator merge"
         );
 
-        for (i, &v) in other.sums.iter().enumerate() {
-            self.sums[i] += v;
-        }
+        self.sums += &other.sums;
         self.count += other.count;
     }
 
@@ -172,9 +176,7 @@ impl Accumulator {
     /// Useful for time-weighted baselines where recent patterns
     /// should have more influence.
     pub fn decay(&mut self, factor: f64) {
-        for v in &mut self.sums {
-            *v *= factor;
-        }
+        self.sums *= factor;
     }
 
     /// Estimate how close the accumulator is to saturation.
@@ -193,7 +195,7 @@ impl Accumulator {
 
         let max_items = d / (2.0 * (codebook_size as f64).ln());
 
-        let l2_sq: f64 = self.sums.iter().map(|&x| x * x).sum();
+        let l2_sq = self.sums.dot(&self.sums);
         let estimated_items = l2_sq / d;
 
         (1.0 - estimated_items / max_items).clamp(0.0, 1.0)
@@ -211,7 +213,7 @@ impl Accumulator {
             return 0.0;
         }
 
-        let l2_sq: f64 = self.sums.iter().map(|&x| x * x).sum();
+        let l2_sq = self.sums.dot(&self.sums);
         if l2_sq < 1e-10 {
             return 0.0;
         }
@@ -226,7 +228,7 @@ impl Accumulator {
     /// For a single bipolar vector of dimension d: PR = d.
     /// As structure concentrates into fewer dimensions, PR decreases.
     pub fn participation_ratio(&self) -> f64 {
-        let l2_sq: f64 = self.sums.iter().map(|&x| x * x).sum();
+        let l2_sq = self.sums.dot(&self.sums);
         if l2_sq < 1e-10 {
             return 0.0;
         }
