@@ -5,7 +5,8 @@
 //!
 //! Run: cargo run --example walkable_detection
 
-use holon::{Holon, ScalarValue, WalkType, Walkable, WalkableValue};
+use holon::highlevel::Holon;
+use holon::kernel::{ScalarValue, WalkType, Walkable, WalkableValue};
 use std::collections::VecDeque;
 
 // =============================================================================

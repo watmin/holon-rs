@@ -15,7 +15,7 @@
 //! # Usage
 //!
 //! ```rust
-//! use holon::{Encoder, VectorManager};
+//! use holon::kernel::{Encoder, VectorManager};
 //! use holon::memory::{OnlineSubspace, EngramLibrary};
 //!
 //! let vm = VectorManager::new(4096);

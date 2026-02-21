@@ -6,7 +6,7 @@
 //! - **negate**: Remove from superposition (NOT)
 //! - **permute**: Encode sequence positions
 
-use crate::vector::Vector;
+use super::vector::Vector;
 
 /// Collection of VSA primitive operations.
 pub struct Primitives;

@@ -3,7 +3,7 @@
 //! This module provides the core guarantee of Holon:
 //! The same atomic value ALWAYS produces the SAME vector.
 
-use crate::vector::Vector;
+use super::vector::Vector;
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use sha2::{Digest, Sha256};

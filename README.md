@@ -20,37 +20,40 @@ Three layers, same as Python Holon:
 
 ```
 ┌─────────────────────────────────────────────┐
-│  Holon facade  (convenience wrapper)        │
+│  highlevel::  Holon  (convenience wrapper)  │
 ├─────────────────────────────────────────────┤
 │  memory::  OnlineSubspace, EngramLibrary    │
 ├─────────────────────────────────────────────┤
-│  primitives:: / encoder:: / scalar::        │
-│  similarity:: / accumulator:: / walkable::  │
-│  vector:: / vector_manager::                │
+│  kernel::  primitives / encoder / scalar    │
+│            similarity / accumulator         │
+│            walkable / vector / vector_mgr   │
 └─────────────────────────────────────────────┘
 ```
 
-1. **Kernel** — VSA primitives, encoding, similarity, accumulators, walkable trait
-2. **Memory** — Online subspace learning (CCIPCA), engram storage and recall
-3. **Holon facade** — Convenience wrapper that owns an `Encoder` and delegates
+1. **`kernel`** — VSA primitives, encoding, similarity, accumulators, walkable trait
+2. **`memory`** — Online subspace learning (CCIPCA), engram storage and recall
+3. **`highlevel`** — `Holon` convenience wrapper that owns an `Encoder` and delegates
 
-Everything is usable at any level:
+Import directly from layers for clarity, or use crate-level re-exports for convenience:
 
 ```rust
-// Direct module imports — full control
-use holon::primitives::Primitives;
-use holon::similarity::{Similarity, Metric};
+// Explicit layer imports (recommended for library / production code)
+use holon::kernel::{Encoder, VectorManager, Primitives, Similarity};
 use holon::memory::OnlineSubspace;
 
+let vm = VectorManager::new(4096);
+let enc = Encoder::new(vm.clone());
+
+let a = enc.encode_json(r#"{"role": "admin"}"#)?;
+let b = enc.encode_json(r#"{"role": "user"}"#)?;
 let sim = Similarity::cosine(&a, &b);
-let bound = Primitives::bind(&role, &filler);
-let mut sub = OnlineSubspace::new(4096, 32);
+let bound = Primitives::bind(&a, &b);
 
-// Crate-level re-exports — less typing, same types
-use holon::{OnlineSubspace, Metric, Similarity};
+// Crate-level re-exports (less typing, same types)
+use holon::{Encoder, VectorManager, OnlineSubspace};
 
-// Holon facade — most ergonomic for common workflows
-use holon::Holon;
+// Holon facade (most ergonomic for quick scripts)
+use holon::highlevel::Holon;
 let holon = Holon::new(4096);
 let vec = holon.encode_json(r#"{"key": "value"}"#)?;
 let sim = holon.similarity(&a, &b);
@@ -62,35 +65,39 @@ The facade never hides functionality — it delegates to the same public types y
 ## Quick Start
 
 ```rust
-use holon::Holon;
+use holon::kernel::{Encoder, VectorManager, Primitives, Similarity, Accumulator};
 
 fn main() -> holon::Result<()> {
-    let holon = Holon::new(4096);
+    let vm = VectorManager::new(4096);
+    let enc = Encoder::new(vm);
 
     // Encode structured data as vectors
-    let normal = holon.encode_json(r#"{"type": "login", "user": "alice"}"#)?;
-    let suspicious = holon.encode_json(r#"{"type": "login", "attempts": 1000}"#)?;
+    let normal = enc.encode_json(r#"{"type": "login", "user": "alice"}"#)?;
+    let suspicious = enc.encode_json(r#"{"type": "login", "attempts": 1000}"#)?;
 
     // Similarity: 0.0 = orthogonal, 1.0 = identical
-    let sim = holon.similarity(&normal, &suspicious);
+    let sim = Similarity::cosine(&normal, &suspicious);
     println!("Similarity: {:.3}", sim);  // Different structures → low similarity
 
     // Learn what's "normal" from a stream
-    let mut baseline = holon.create_accumulator();
+    let mut baseline = Accumulator::new(4096);
     for _ in 0..1000 {
-        let event = holon.encode_json(r#"{"type": "normal"}"#)?;
-        holon.accumulate(&mut baseline, &event);
+        let event = enc.encode_json(r#"{"type": "normal"}"#)?;
+        baseline.add(&event);
     }
-    let normal_pattern = holon.normalize_accumulator(&baseline);
+    let normal_pattern = baseline.normalize();
 
     // Detect anomalies
-    let anomaly = holon.encode_json(r#"{"type": "attack", "payload": "DROP TABLE"}"#)?;
-    let anomaly_score = 1.0 - holon.similarity(&anomaly, &normal_pattern);
+    let anomaly = enc.encode_json(r#"{"type": "attack", "payload": "DROP TABLE"}"#)?;
+    let anomaly_score = 1.0 - Similarity::cosine(&anomaly, &normal_pattern);
     println!("Anomaly score: {:.3}", anomaly_score);  // High = anomalous
 
     Ok(())
 }
 ```
+
+> **Note**: The Quick Start uses explicit kernel imports. For a more concise facade-based
+> API, see `holon::highlevel::Holon`.
 
 <div align="center">
 <img src="https://raw.githubusercontent.com/watmin/holon-rs/main/assets/time-bending-lattices.gif" alt="Time-Bending Lattices">
@@ -157,12 +164,14 @@ FALSE POSITIVE RATE                           4%
 Same atom → same vector. Always. Everywhere.
 
 ```rust
+use holon::kernel::VectorManager;
+
 // Tokyo data center
-let tokyo = Holon::with_seed(4096, 42);
+let tokyo = VectorManager::with_seed(4096, 42);
 let vec_tokyo = tokyo.get_vector("suspicious_pattern");
 
 // NYC data center
-let nyc = Holon::with_seed(4096, 42);
+let nyc = VectorManager::with_seed(4096, 42);
 let vec_nyc = nyc.get_vector("suspicious_pattern");
 
 assert_eq!(vec_tokyo, vec_nyc);  // Always true - no sync needed!
@@ -175,10 +184,15 @@ This enables **distributed consensus without synchronization**. Every node with 
 Structure matters. `{"src_port": 53}` is different from `{"dst_port": 53}`:
 
 ```rust
-let src = holon.encode_json(r#"{"src_port": 53}"#)?;
-let dst = holon.encode_json(r#"{"dst_port": 53}"#)?;
+use holon::kernel::{Encoder, VectorManager, Similarity};
 
-let sim = holon.similarity(&src, &dst);
+let vm = VectorManager::new(4096);
+let enc = Encoder::new(vm);
+
+let src = enc.encode_json(r#"{"src_port": 53}"#).unwrap();
+let dst = enc.encode_json(r#"{"dst_port": 53}"#).unwrap();
+
+let sim = Similarity::cosine(&src, &dst);
 assert!(sim < 0.5);  // Same value, different role → different vector
 ```
 
@@ -217,15 +231,19 @@ New operations for explainable anomaly forensics:
 Encode rates, temperatures, angles, timestamps — where similar values have similar vectors:
 
 ```rust
+use holon::kernel::{ScalarEncoder, ScalarMode};
+
+let scalar = ScalarEncoder::new(4096);
+
 // Log-scale: equal ratios = equal similarity
-let r100 = holon.encode_scalar_log(100.0);
-let r1000 = holon.encode_scalar_log(1000.0);
-let r10000 = holon.encode_scalar_log(10000.0);
+let r100 = scalar.encode_log(100.0);
+let r1000 = scalar.encode_log(1000.0);
+let r10000 = scalar.encode_log(10000.0);
 // 100→1000 similarity ≈ 1000→10000 (both 10x ratio)
 
 // Circular: hour 23 is similar to hour 0
-let h23 = holon.encode_scalar(23.0, ScalarMode::Circular { period: 24.0 });
-let h0 = holon.encode_scalar(0.0, ScalarMode::Circular { period: 24.0 });
+let h23 = scalar.encode(23.0, ScalarMode::Circular { period: 24.0 });
+let h0 = scalar.encode(0.0, ScalarMode::Circular { period: 24.0 });
 ```
 
 | Mode | Use Case | Similarity Property |
@@ -239,7 +257,7 @@ let h0 = holon.encode_scalar(0.0, ScalarMode::Circular { period: 24.0 });
 Encode Unix timestamps with circular periodicity — same hour next week ≈ same vector:
 
 ```rust
-use holon::{ScalarValue, TimeResolution};
+use holon::kernel::{ScalarValue, TimeResolution};
 
 // Default resolution (Hour)
 let morning = ScalarValue::time(1_700_000_000.0);
@@ -260,25 +278,27 @@ TimeFloat decomposes timestamps into four components bound by role vectors:
 Learn what "normal" looks like from a stream, then score new observations:
 
 ```rust
+use holon::kernel::{Encoder, VectorManager};
 use holon::memory::{OnlineSubspace, EngramLibrary};
 
-let holon = Holon::new(4096);
+let vm = VectorManager::new(4096);
+let enc = Encoder::new(vm);
 
 // Learn the normal traffic manifold online (CCIPCA algorithm)
-let mut subspace = holon.create_subspace(32);
+let mut subspace = OnlineSubspace::new(4096, 32);
 for event in training_events {
-    let vec = holon.encode_walkable(&event);
+    let vec = enc.encode_walkable(&event);
     subspace.update(&vec.to_f64());
 }
 
 // Score new observations: residual > threshold → anomaly
-let probe = holon.encode_walkable(&new_event);
+let probe = enc.encode_walkable(&new_event);
 if subspace.residual(&probe.to_f64()) > subspace.threshold() {
     println!("anomaly detected");
 }
 
 // Store learned patterns as named engrams
-let mut library = holon.create_engram_library();
+let mut library = EngramLibrary::new(4096);
 library.add("normal_traffic", &subspace, None, Default::default());
 
 // Later: recall the best-matching pattern
@@ -291,7 +311,7 @@ let matches = library.match_vec(&probe.to_f64(), 3, 10);
 Skip JSON entirely — encode your structs directly:
 
 ```rust
-use holon::{Walkable, WalkType, WalkableRef, ScalarValue, WalkableValue};
+use holon::kernel::{Encoder, VectorManager, Walkable, WalkType, WalkableValue, ScalarValue};
 
 struct Packet {
     protocol: String,
@@ -310,7 +330,9 @@ impl Walkable for Packet {
     }
 }
 
-let vec = holon.encode_walkable(&my_packet);
+let vm = VectorManager::new(4096);
+let enc = Encoder::new(vm);
+let vec = enc.encode_walkable(&my_packet);
 ```
 
 ### Accumulators: Frequency Matters
@@ -318,15 +340,17 @@ let vec = holon.encode_walkable(&my_packet);
 The secret weapon for anomaly detection:
 
 ```rust
+use holon::kernel::{Primitives, Accumulator, Similarity};
+
 // Bundle is idempotent - 100x same = 1x
-let bundled = holon.bundle(&[&a, &a, &a, /* ...100x... */ &a]);
+let bundled = Primitives::bundle(&[&a, &a, &a, /* ...100x... */ &a]);
 
 // Accumulator preserves frequency - 100x normal drowns out 1x rare
-let mut acc = holon.create_accumulator();
+let mut acc = Accumulator::new(4096);
 for _ in 0..100 {
-    holon.accumulate(&mut acc, &normal);
+    acc.add(&normal);
 }
-holon.accumulate(&mut acc, &rare);
+acc.add(&rare);
 
 // 99% of the signal is "normal" - rare barely registers
 ```
@@ -391,23 +415,28 @@ cargo test --features simd
 ```
 holon-rs/
 ├── src/
-│   ├── lib.rs            # Public API + Holon convenience wrapper
-│   ├── vector.rs         # Bipolar vectors {-1, 0, 1}
-│   ├── vector_manager.rs # Deterministic atom→vector
-│   ├── primitives.rs     # VSA operations
-│   ├── encoder.rs        # JSON + Walkable → vector encoding
-│   ├── walkable.rs       # Zero-serialization Walkable trait
-│   ├── scalar.rs         # Continuous value encoding
-│   ├── accumulator.rs    # Streaming primitives
-│   ├── similarity.rs     # Metrics (cosine, dot, etc.)
-│   ├── error.rs          # Error types
-│   └── memory/
-│       ├── mod.rs        # Re-exports
-│       ├── subspace.rs   # OnlineSubspace (CCIPCA)
-│       └── engram.rs     # Engram + EngramLibrary
-├── examples/             # 17 runnable demos
+│   ├── lib.rs              # Crate root: module declarations + re-exports
+│   ├── error.rs            # Error types (shared across layers)
+│   ├── kernel/
+│   │   ├── mod.rs          # Kernel re-exports
+│   │   ├── vector.rs       # Bipolar vectors {-1, 0, 1}
+│   │   ├── vector_manager.rs # Deterministic atom→vector
+│   │   ├── primitives.rs   # VSA operations
+│   │   ├── encoder.rs      # JSON + Walkable → vector encoding
+│   │   ├── walkable.rs     # Zero-serialization Walkable trait
+│   │   ├── scalar.rs       # Continuous value encoding
+│   │   ├── accumulator.rs  # Streaming primitives
+│   │   └── similarity.rs   # Metrics (cosine, dot, etc.)
+│   ├── memory/
+│   │   ├── mod.rs          # Re-exports
+│   │   ├── subspace.rs     # OnlineSubspace (CCIPCA)
+│   │   └── engram.rs       # Engram + EngramLibrary
+│   └── highlevel/
+│       ├── mod.rs          # Re-exports
+│       └── client.rs       # Holon convenience wrapper
+├── examples/               # 17 runnable demos
 └── benches/
-    └── benchmarks.rs     # Criterion benchmarks
+    └── benchmarks.rs       # Criterion benchmarks
 ```
 
 <div align="center">
@@ -420,6 +449,7 @@ holon-rs/
 
 | Feature | Python | Rust |
 |---------|--------|------|
+| Three-layer architecture (kernel/memory/highlevel) | ✅ | ✅ |
 | Deterministic vectors | ✅ | ✅ |
 | Role-filler binding | ✅ | ✅ |
 | All VSA primitives | ✅ | ✅ |

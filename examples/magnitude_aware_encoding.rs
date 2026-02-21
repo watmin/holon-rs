@@ -8,7 +8,8 @@
 //!
 //! Run: cargo run --example magnitude_aware_encoding --release
 
-use holon::{Holon, Similarity};
+use holon::highlevel::Holon;
+use holon::kernel::Similarity;
 
 fn print_header(title: &str) {
     println!();

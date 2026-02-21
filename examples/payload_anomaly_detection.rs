@@ -14,7 +14,7 @@
 //!
 //! Run: cargo run --example payload_anomaly_detection --release
 
-use holon::Holon;
+use holon::highlevel::Holon;
 use std::collections::HashMap;
 
 const DIMENSIONS: usize = 4096;

@@ -9,7 +9,7 @@
 //!
 //! Run: cargo run --example pure_vector_rate
 
-use holon::Holon;
+use holon::highlevel::Holon;
 use std::collections::VecDeque;
 
 // =============================================================================

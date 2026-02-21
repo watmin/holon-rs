@@ -15,7 +15,8 @@
 //! Run: cargo run --example online_anomaly_memory --release
 
 use holon::memory::{EngramLibrary, OnlineSubspace};
-use holon::{Holon, ScalarRef, ScalarValue, WalkType, Walkable, WalkableRef, WalkableValue};
+use holon::highlevel::Holon;
+use holon::kernel::{ScalarRef, ScalarValue, WalkType, Walkable, WalkableRef, WalkableValue};
 use rand::prelude::*;
 use std::collections::HashMap;
 

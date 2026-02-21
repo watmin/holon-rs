@@ -7,7 +7,8 @@
 //!
 //! Run: cargo run --example attack_variant_detection
 
-use holon::{Holon, Primitives, Vector};
+use holon::highlevel::Holon;
+use holon::kernel::{Primitives, Vector};
 use rand::prelude::*;
 use std::collections::HashMap;
 

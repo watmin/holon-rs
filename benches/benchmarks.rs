@@ -1,8 +1,9 @@
 //! Benchmarks for Holon operations.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use holon::highlevel::Holon;
+use holon::kernel::{ScalarMode, ScalarValue, WalkType, Walkable, WalkableRef, WalkableValue};
 use holon::memory::{EngramLibrary, OnlineSubspace};
-use holon::{Holon, ScalarMode, ScalarValue, WalkType, Walkable, WalkableRef, WalkableValue};
 
 // =============================================================================
 // Walkable Packet for benchmarking (with fast visitor)

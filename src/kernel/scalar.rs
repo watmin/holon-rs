@@ -21,7 +21,7 @@
 //! - Hour 23 is similar to hour 0
 //! - December is similar to January
 
-use crate::vector::Vector;
+use super::vector::Vector;
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use sha2::{Digest, Sha256};

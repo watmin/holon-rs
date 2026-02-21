@@ -5,7 +5,8 @@
 //!
 //! Run: cargo run --example walkable_rate
 
-use holon::{Holon, WalkType, Walkable, WalkableValue};
+use holon::highlevel::Holon;
+use holon::kernel::{WalkType, Walkable, WalkableValue};
 use std::collections::VecDeque;
 
 // =============================================================================

@@ -14,7 +14,7 @@
 //! This matters for anomaly detection: common patterns should dominate
 //! the baseline, so rare anomalies have low similarity.
 
-use crate::vector::Vector;
+use super::vector::Vector;
 
 /// A frequency-preserving accumulator for streaming data.
 ///

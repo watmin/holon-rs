@@ -17,7 +17,7 @@
 //!
 //! Run: cargo run --example byte_match_derivation --release
 
-use holon::Holon;
+use holon::highlevel::Holon;
 use std::collections::{HashMap, HashSet};
 
 const DIMENSIONS: usize = 4096;

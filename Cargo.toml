@@ -12,7 +12,7 @@ documentation = "https://docs.rs/holon"
 readme = "README.md"
 keywords = ["vsa", "hdc", "hyperdimensional", "vector", "similarity"]
 categories = ["science", "data-structures", "encoding"]
-exclude = ["assets/**", "PARITY.md"]
+exclude = ["assets/**", "docs/**"]
 
 [lib]
 name = "holon"

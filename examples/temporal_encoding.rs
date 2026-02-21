@@ -16,8 +16,9 @@
 //! Run: cargo run --example temporal_encoding --release
 
 use holon::memory::OnlineSubspace;
-use holon::{
-    Holon, Similarity, ScalarValue, TimeResolution, WalkType, Walkable, WalkableRef, WalkableValue,
+use holon::highlevel::Holon;
+use holon::kernel::{
+    ScalarValue, Similarity, TimeResolution, WalkType, Walkable, WalkableRef, WalkableValue,
 };
 use rand::prelude::*;
 

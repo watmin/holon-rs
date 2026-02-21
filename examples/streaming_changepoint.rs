@@ -7,9 +7,11 @@
 //!
 //! Run: cargo run --example streaming_changepoint --release
 
-use holon::memory::OnlineSubspace;
-use holon::primitives::{Primitives, SegmentMethod};
-use holon::{Holon, ScalarValue, WalkType, Walkable, WalkableValue};
+use holon::kernel::{
+    Encoder, Primitives, SegmentMethod, VectorManager, Vector,
+    ScalarValue, WalkType, Walkable, WalkableValue,
+};
+use holon::memory::{EngramLibrary, OnlineSubspace};
 use rand::prelude::*;
 use std::collections::HashMap;
 
@@ -143,7 +145,8 @@ fn print_subheader(title: &str) {
 fn main() -> holon::Result<()> {
     print_header("STREAMING CHANGEPOINT DETECTION\n  System Health Without Labels");
 
-    let holon = Holon::with_seed(4096, 42);
+    let vm = VectorManager::with_seed(4096, 42);
+    let encoder = Encoder::new(vm);
     let mut rng = StdRng::seed_from_u64(42);
 
     let n_healthy  = 50usize;
@@ -156,23 +159,23 @@ fn main() -> holon::Result<()> {
     let total = b3 + n_recovery;
 
     // Build the stream
-    let mut stream_vecs: Vec<holon::Vector> = Vec::with_capacity(total);
+    let mut stream_vecs: Vec<Vector> = Vec::with_capacity(total);
     let mut phase_labels: Vec<&'static str> = Vec::with_capacity(total);
 
     for _ in 0..n_healthy {
-        stream_vecs.push(holon.encode_walkable(&healthy_metrics(&mut rng)));
+        stream_vecs.push(encoder.encode_walkable(&healthy_metrics(&mut rng)));
         phase_labels.push("healthy");
     }
     for i in 0..n_degraded {
-        stream_vecs.push(holon.encode_walkable(&degraded_metrics(&mut rng, i)));
+        stream_vecs.push(encoder.encode_walkable(&degraded_metrics(&mut rng, i)));
         phase_labels.push("degraded");
     }
     for _ in 0..n_incident {
-        stream_vecs.push(holon.encode_walkable(&incident_metrics(&mut rng)));
+        stream_vecs.push(encoder.encode_walkable(&incident_metrics(&mut rng)));
         phase_labels.push("incident");
     }
     for i in 0..n_recovery {
-        stream_vecs.push(holon.encode_walkable(&recovery_metrics(&mut rng, i)));
+        stream_vecs.push(encoder.encode_walkable(&recovery_metrics(&mut rng, i)));
         phase_labels.push("recovery");
     }
 
@@ -197,7 +200,7 @@ fn main() -> holon::Result<()> {
         subspace.update(&v.to_f64());
     }
 
-    let mut library = holon.create_engram_library();
+    let mut library = EngramLibrary::new(4096);
     library.add("healthy", &subspace, None, HashMap::new());
 
     let train_residuals: Vec<f64> = stream_vecs[..n_healthy]
@@ -320,9 +323,9 @@ fn main() -> holon::Result<()> {
     // =========================================================================
     print_subheader("CHANGE ANALYSIS  (difference + invert)");
 
-    let healthy_refs: Vec<&holon::Vector>  = stream_vecs[..b1].iter().collect();
-    let incident_refs: Vec<&holon::Vector> = stream_vecs[b2..b3].iter().collect();
-    let recovery_refs: Vec<&holon::Vector> = stream_vecs[b3..].iter().collect();
+    let healthy_refs: Vec<&Vector>  = stream_vecs[..b1].iter().collect();
+    let incident_refs: Vec<&Vector> = stream_vecs[b2..b3].iter().collect();
+    let recovery_refs: Vec<&Vector> = stream_vecs[b3..].iter().collect();
 
     let healthy_proto  = Primitives::prototype(&healthy_refs,  0.5);
     let incident_proto = Primitives::prototype(&incident_refs, 0.5);

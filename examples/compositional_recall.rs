@@ -5,9 +5,11 @@
 //!
 //! Run: cargo run --example compositional_recall --release
 
-use holon::memory::OnlineSubspace;
-use holon::primitives::{AttendMode, NegateMethod, Primitives};
-use holon::{Holon, ScalarValue, WalkType, Walkable, WalkableValue};
+use holon::kernel::{
+    AttendMode, Encoder, NegateMethod, Primitives, Similarity, VectorManager, Vector,
+    ScalarValue, WalkType, Walkable, WalkableValue,
+};
+use holon::memory::{EngramLibrary, OnlineSubspace};
 use std::collections::HashMap;
 
 // =============================================================================
@@ -83,12 +85,12 @@ fn print_header(title: &str) {
     println!("{}", "=".repeat(65));
 }
 
-fn show_results(label: &str, query: &holon::Vector, incident_vecs: &[holon::Vector], holon: &Holon, top_k: usize) {
+fn show_results(label: &str, query: &Vector, incident_vecs: &[Vector], top_k: usize) {
     println!("\n  Query   : {}", label);
     let mut sims: Vec<(usize, f64)> = incident_vecs
         .iter()
         .enumerate()
-        .map(|(i, v)| (i, holon.similarity(query, v)))
+        .map(|(i, v)| (i, Similarity::cosine(query, v)))
         .collect();
     sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     for (rank, (idx, sim)) in sims.iter().take(top_k).enumerate() {
@@ -114,17 +116,18 @@ fn show_results(label: &str, query: &holon::Vector, incident_vecs: &[holon::Vect
 fn main() -> holon::Result<()> {
     print_header("COMPOSITIONAL RECALL\n  Algebraic Queries Over Incident Memory");
 
-    let holon = Holon::with_seed(4096, 42);
+    let vm = VectorManager::with_seed(4096, 42);
+    let encoder = Encoder::new(vm);
 
     // Encode all incidents
     println!("\nEncoding {} incidents across 4 service layers...", INCIDENTS.len());
-    let incident_vecs: Vec<holon::Vector> = INCIDENTS
+    let incident_vecs: Vec<Vector> = INCIDENTS
         .iter()
-        .map(|inc| holon.encode_walkable(inc))
+        .map(|inc| encoder.encode_walkable(inc))
         .collect();
 
     // Build layer + env prototypes
-    let layer_vecs = |layer: &str| -> Vec<&holon::Vector> {
+    let layer_vecs = |layer: &str| -> Vec<&Vector> {
         incident_vecs
             .iter()
             .zip(INCIDENTS.iter())
@@ -132,7 +135,7 @@ fn main() -> holon::Result<()> {
             .map(|(v, _)| v)
             .collect()
     };
-    let env_vecs = |env: &str| -> Vec<&holon::Vector> {
+    let env_vecs = |env: &str| -> Vec<&Vector> {
         incident_vecs
             .iter()
             .zip(INCIDENTS.iter())
@@ -154,7 +157,7 @@ fn main() -> holon::Result<()> {
     let prod_proto     = Primitives::prototype(&prod_refs,     0.5);
 
     // Build EngramLibrary — one subspace per layer
-    let mut library = holon.create_engram_library();
+    let mut library = EngramLibrary::new(4096);
     for (layer_name, refs) in &[
         ("database", &db_refs),
         ("frontend", &frontend_refs),
@@ -185,7 +188,7 @@ fn main() -> holon::Result<()> {
         team: "platform",
         resolved: false,
     };
-    let probe = holon.encode_walkable(&probe_incident);
+    let probe = encoder.encode_walkable(&probe_incident);
 
     println!();
     println!("{}", "-".repeat(65));
@@ -193,20 +196,20 @@ fn main() -> holon::Result<()> {
     println!("{}", "-".repeat(65));
 
     // 1. Basic recall — cosine similarity, what any vector DB gives you
-    show_results("Basic recall (cosine similarity)", &probe, &incident_vecs, &holon, 4);
+    show_results("Basic recall (cosine similarity)", &probe, &incident_vecs, 4);
 
     // 2. Negation — subtract the database structural signal
     let probe_no_db = Primitives::negate_with_method(&probe, &db_proto, NegateMethod::Subtract);
     show_results(
         "negate(probe, db_proto) — exclude database incidents",
-        &probe_no_db, &incident_vecs, &holon, 4,
+        &probe_no_db, &incident_vecs, 4,
     );
 
     // 3. Amplification — strengthen the production-environment signal
     let probe_prod = Primitives::amplify(&probe, &prod_proto, 1.5);
     show_results(
         "amplify(probe, prod_proto) — prioritise production impact",
-        &probe_prod, &incident_vecs, &holon, 4,
+        &probe_prod, &incident_vecs, 4,
     );
 
     // 4. Analogy — transfer the backend→security relationship onto the probe
@@ -214,14 +217,14 @@ fn main() -> holon::Result<()> {
     let probe_as_security = Primitives::analogy(&backend_proto, &security_proto, &probe);
     show_results(
         "analogy(backend→security, probe) — transfer pattern to security layer",
-        &probe_as_security, &incident_vecs, &holon, 4,
+        &probe_as_security, &incident_vecs, 4,
     );
 
     // 5. Attend — extract the security-resonant components of the probe
     let probe_security_view = Primitives::attend(&probe, &security_proto, 2.0, AttendMode::Soft);
     show_results(
         "attend(probe, security_proto) — surface security-resonant signal",
-        &probe_security_view, &incident_vecs, &holon, 4,
+        &probe_security_view, &incident_vecs, 4,
     );
 
     // 6. EngramLibrary — which layer manifold does the probe fit best?

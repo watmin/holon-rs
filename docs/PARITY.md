@@ -7,7 +7,7 @@ The core algebra, encoding, accumulator, distance metrics, vector manager
 utilities, memory layer, and temporal encoding are all at full parity.
 The only remaining gaps are low-priority domain-specific convenience wrappers.
 
-## Distance Metrics (similarity.rs) — ✅ COMPLETE
+## Distance Metrics (kernel/similarity.rs) — ✅ COMPLETE
 
 Python's `distance.py` has 11 metrics. Rust now has all 11.
 
@@ -29,9 +29,9 @@ Python's `distance.py` has 11 metrics. Rust now has all 11.
 via `Similarity::compute()`). Minkowski, Weighted Cosine, and Weighted Euclidean
 are standalone methods on `Similarity` because they require extra parameters
 (`p: f64` or `weights: &[f64]`) that don't fit in a `Copy + Eq` enum. All three
-are also exposed on `Holon` as convenience methods.
+are also exposed on the `highlevel::Holon` convenience wrapper.
 
-## VectorManager Utilities (vector_manager.rs) — ✅ COMPLETE
+## VectorManager Utilities (kernel/vector_manager.rs) — ✅ COMPLETE
 
 | Function | Rust API | Status |
 |---|---|---|
@@ -52,7 +52,7 @@ it's a testing concern — same as the Python version, but more idiomatic for Ru
 
 ## Memory Layer (memory/) — ✅ COMPLETE
 
-Python's `holon/memory/` contains two modules ported to `src/memory/`.
+Python's `holon/memory/` contains two modules ported to `src/memory/` (same path in both languages).
 
 | Component | Rust API | Status |
 |---|---|---|
@@ -91,7 +91,7 @@ produce the same residuals given the same inputs.
 **Skipped:** Persistence backends (CPUStore, QdrantStore). The Engram JSON
 serialisation (`save/load`) is sufficient for the use cases we care about.
 
-## TimeScale Encoding (walkable.rs + encoder.rs) — ✅ COMPLETE
+## TimeScale Encoding (kernel/walkable.rs + kernel/encoder.rs) — ✅ COMPLETE
 
 Python's `TimeScale` walkable wrapper is ported as `TimeFloat`/`TimeResolution`.
 
@@ -114,7 +114,7 @@ the same seed produces identical encodings in both languages.
 **No new dependencies:** Unix timestamp decomposition uses integer arithmetic
 only. No `chrono` required.
 
-## Mathematical Primitives (encoder.py)
+## Mathematical Primitives (Python: kernel/encoder.py)
 
 Python has 8 specialized encoding primitives:
 
@@ -139,7 +139,7 @@ scalar encoder. They could live in a separate `math_encodings` module or
 even in userland rather than the core library. Review whether they belong
 in core or should be an extension crate.
 
-## AdvancedSimilarityEngine (similarity.py)
+## AdvancedSimilarityEngine (Python: kernel/similarity.py)
 
 Python has composite similarity strategies:
 

@@ -3,7 +3,7 @@
 //! When compiled with the `simd` feature, uses SIMD-accelerated implementations
 //! for up to 200x faster similarity computations on supported hardware.
 
-use crate::vector::Vector;
+use super::vector::Vector;
 
 /// Available similarity metrics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

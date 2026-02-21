@@ -5,7 +5,8 @@
 //!
 //! Run: cargo run --example targeted_rate_limiting
 
-use holon::{Holon, Primitives, Vector};
+use holon::highlevel::Holon;
+use holon::kernel::{Primitives, Vector};
 use rand::prelude::*;
 use std::collections::HashMap;
 

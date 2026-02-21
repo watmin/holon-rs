@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Core VSA Primitives (`holon::primitives`)
+#### Core VSA Primitives (`holon::kernel::primitives`)
 - `bind` / `unbind` — associative binding (AND-like)
 - `bundle` / `prototype` — superposition and majority voting (OR-like)
 - `negate` / `negate_with_method` — component removal (NOT-like)
@@ -35,17 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `reflect_about_mean` / `grover_amplify` — quantum-inspired operators
 - `drift_rate` — temporal similarity derivative
 
-#### Encoding (`holon::encoder`)
+#### Encoding (`holon::kernel::encoder`)
 - JSON encoding — convert `serde_json::Value` or JSON strings to vectors
 - Sequence encoding — `Bundle`, `Positional`, `Chained`, `Ngram` modes
 - Walkable encoding — zero-serialization path for typed Rust structs
 
-#### Scalar Encoding (`holon::scalar`)
+#### Scalar Encoding (`holon::kernel::scalar`)
 - `LogFloat` — log-scale encoding for rates, frequencies, multiplicative quantities
 - `LinearFloat` — linear-scale encoding
 - `TimeFloat` + `TimeResolution` — temporal encoding with circular hour/day/week components
 
-#### Walkable Trait (`holon::walkable`)
+#### Walkable Trait (`holon::kernel::walkable`)
 - `Walkable` trait for zero-copy struct encoding
 - `ScalarValue` / `ScalarRef` — inline scalar markers (`$log`, `$linear`, `$time`)
 - `WalkableValue` / `WalkableRef` — typed walk nodes
@@ -66,20 +66,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `match_spectrum` — eigenvalue-spectrum matching
   - `save` / `load` — JSON persistence
 
-#### Accumulator (`holon::accumulator`)
+#### Accumulator (`holon::kernel::accumulator`)
 - Streaming frequency-weighted accumulation
 - `add` / `normalize` / `threshold` — core operations
 - `capacity` / `purity` / `participation_ratio` — health metrics
 
-#### Similarity (`holon::similarity`)
+#### Similarity (`holon::kernel::similarity`)
 - `Cosine`, `Hamming`, `Euclidean`, `Jaccard` metrics
 - `weighted_cosine` / `weighted_euclidean` — per-dimension weights
 - `minkowski` — generalized Lp distance
 - `significance` — cosine similarity to z-score
 
-#### Facade (`holon::Holon`)
-- Unified convenience wrapper exposing all primitives, encoding, accumulator,
-  similarity, and memory operations through a single `Holon` struct
+#### High-level (`holon::highlevel::Holon`)
+- Convenience wrapper delegating to kernel and memory layers through a
+  single `Holon` struct
 
 #### Optional Features
 - `simd` feature — SIMD-accelerated similarity via `simsimd` (up to 200x faster)

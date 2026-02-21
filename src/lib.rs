@@ -3,722 +3,75 @@
 //! Holon is a vector symbolic architecture (VSA) / hyperdimensional computing (HDC)
 //! library for building deterministic, explainable AI systems.
 //!
-//! ## Quick Start
+//! ## Three-layer architecture
+//!
+//! | Layer | Purpose |
+//! |-------|---------|
+//! | [`kernel`] | VSA primitives, encoding, similarity, accumulators, walkable trait |
+//! | [`memory`] | Online subspace learning (CCIPCA), engram storage and recall |
+//! | [`highlevel`] | [`Holon`] convenience wrapper that owns an encoder and delegates |
+//!
+//! ## Usage
 //!
 //! ```rust
-//! use holon::Holon;
+//! // Direct kernel + memory imports (recommended for library / production code)
+//! use holon::kernel::{Encoder, VectorManager, Primitives, Similarity};
+//! use holon::memory::OnlineSubspace;
 //!
-//! // Create a Holon instance
-//! let holon = Holon::new(4096);
+//! let vm = VectorManager::new(4096);
+//! let enc = Encoder::new(vm.clone());
 //!
-//! // Encode structured data
-//! let billing = holon.encode_json(r#"{"type": "billing", "amount": 100}"#).unwrap();
-//! let technical = holon.encode_json(r#"{"type": "technical"}"#).unwrap();
-//!
-//! // Compute similarity
-//! let sim = holon.similarity(&billing, &technical);
-//! println!("Similarity: {:.3}", sim);
-//!
-//! // VSA primitives
-//! let combined = holon.bundle(&[&billing, &technical]);
-//! let without_billing = holon.negate(&combined, &billing);
+//! let a = enc.encode_json(r#"{"role": "admin"}"#).unwrap();
+//! let b = enc.encode_json(r#"{"role": "user"}"#).unwrap();
+//! let sim = Similarity::cosine(&a, &b);
+//! let bound = Primitives::bind(&a, &b);
 //! ```
 //!
-//! ## Core Concepts
+//! ```rust
+//! // Crate-level re-exports (less typing, same types)
+//! use holon::{Encoder, VectorManager, OnlineSubspace};
+//! ```
 //!
-//! - **Vectors**: High-dimensional bipolar vectors ({-1, 0, 1})
-//! - **Bind**: Create associations (AND-like)
-//! - **Bundle**: Create superpositions (OR-like)
-//! - **Negate**: Remove component from superposition (NOT)
-//! - **Accumulator**: Streaming operations with frequency preservation
+//! ```rust
+//! // Holon facade (most ergonomic for quick scripts)
+//! use holon::Holon;
+//!
+//! let holon = Holon::new(4096);
+//! let vec = holon.encode_json(r#"{"key": "value"}"#).unwrap();
+//! let sim = holon.similarity(&vec, &vec);
+//! ```
 
-pub mod accumulator;
-pub mod encoder;
 pub mod error;
+pub mod highlevel;
+pub mod kernel;
 pub mod memory;
-pub mod primitives;
-pub mod scalar;
-pub mod similarity;
-pub mod vector;
-pub mod vector_manager;
-pub mod walkable;
 
-// Re-exports for convenience
-pub use accumulator::Accumulator;
-pub use encoder::{Encoder, SequenceMode};
+// ---------------------------------------------------------------------------
+// Backward-compatible module re-exports.
+//
+// These let `use holon::primitives::Primitives` keep working even though
+// the file now lives at `src/kernel/primitives.rs`.
+// ---------------------------------------------------------------------------
+pub use kernel::accumulator;
+pub use kernel::encoder;
+pub use kernel::primitives;
+pub use kernel::scalar;
+pub use kernel::similarity;
+pub use kernel::vector;
+pub use kernel::vector_manager;
+pub use kernel::walkable;
+
+// ---------------------------------------------------------------------------
+// Backward-compatible type re-exports.
+// ---------------------------------------------------------------------------
 pub use error::{HolonError, Result};
-pub use memory::{Engram, EngramLibrary, OnlineSubspace};
-pub use primitives::{AttendMode, GateMode, NegateMethod, Primitives, SegmentMethod};
-pub use scalar::{ScalarEncoder, ScalarMode};
-pub use similarity::{Metric, Similarity};
-pub use vector::Vector;
-pub use vector_manager::VectorManager;
-pub use walkable::{
-    ScalarRef, ScalarValue, TimeResolution, WalkType, Walkable, WalkableRef, WalkableValue,
+pub use highlevel::Holon;
+pub use kernel::{
+    Accumulator, AttendMode, Encoder, GateMode, Metric, NegateMethod, Primitives, ScalarEncoder,
+    ScalarMode, SegmentMethod, SequenceMode, Similarity, Vector, VectorManager,
 };
-
-/// The main Holon client - primary interface for all operations.
-///
-/// This struct provides a clean, unified API for:
-/// - Data encoding
-/// - VSA primitives (bind, bundle, negate, etc.)
-/// - Streaming operations (accumulators)
-/// - Similarity computation
-///
-/// # Example
-///
-/// ```rust
-/// use holon::Holon;
-///
-/// let holon = Holon::new(4096);
-///
-/// // Encode data
-/// let vec = holon.encode_json(r#"{"type": "billing"}"#).unwrap();
-///
-/// // Create accumulator for streaming
-/// let mut accum = holon.create_accumulator();
-/// holon.accumulate(&mut accum, &vec);
-/// let baseline = holon.normalize_accumulator(&accum);
-/// ```
-pub struct Holon {
-    /// Vector dimensionality
-    dimensions: usize,
-    /// Vector manager for atom -> vector mapping
-    vector_manager: VectorManager,
-    /// Encoder for structured data
-    encoder: Encoder,
-    /// Scalar encoder for continuous values
-    scalar_encoder: ScalarEncoder,
-}
-
-impl Holon {
-    /// Create a new Holon instance with the specified dimensionality.
-    ///
-    /// # Arguments
-    /// * `dimensions` - Vector dimensionality (recommended: 4096 or 8192)
-    ///
-    /// # Example
-    /// ```rust
-    /// use holon::Holon;
-    /// let holon = Holon::new(4096);
-    /// ```
-    pub fn new(dimensions: usize) -> Self {
-        let vector_manager = VectorManager::new(dimensions);
-        let encoder = Encoder::new(vector_manager.clone());
-        let scalar_encoder = ScalarEncoder::new(dimensions);
-
-        Self {
-            dimensions,
-            vector_manager,
-            encoder,
-            scalar_encoder,
-        }
-    }
-
-    /// Create a new Holon instance with a specific global seed.
-    ///
-    /// Using the same seed guarantees deterministic, reproducible vectors
-    /// across different runs and machines.
-    pub fn with_seed(dimensions: usize, global_seed: u64) -> Self {
-        let vector_manager = VectorManager::with_seed(dimensions, global_seed);
-        let encoder = Encoder::new(vector_manager.clone());
-        let scalar_encoder = ScalarEncoder::new(dimensions);
-
-        Self {
-            dimensions,
-            vector_manager,
-            encoder,
-            scalar_encoder,
-        }
-    }
-
-    /// Get the vector dimensionality.
-    pub fn dimensions(&self) -> usize {
-        self.dimensions
-    }
-
-    // =========================================================================
-    // Encoding
-    // =========================================================================
-
-    /// Encode a JSON string into a vector.
-    ///
-    /// # Example
-    /// ```rust
-    /// use holon::Holon;
-    /// let holon = Holon::new(4096);
-    /// let vec = holon.encode_json(r#"{"type": "billing", "amount": 100}"#).unwrap();
-    /// ```
-    pub fn encode_json(&self, json: &str) -> Result<Vector> {
-        self.encoder.encode_json(json)
-    }
-
-    /// Encode a serde_json Value directly.
-    ///
-    /// Useful when you already have parsed JSON or want to construct
-    /// values programmatically without serializing to string.
-    pub fn encode_value(&self, value: &serde_json::Value) -> Vector {
-        self.encoder.encode_value(value, None)
-    }
-
-    /// Get the base vector for an atomic value.
-    ///
-    /// Same atom always produces the same vector (deterministic).
-    pub fn get_vector(&self, atom: &str) -> Vector {
-        self.vector_manager.get_vector(atom)
-    }
-
-    /// Encode a continuous scalar value.
-    ///
-    /// # Arguments
-    /// * `value` - The scalar value to encode
-    /// * `mode` - Encoding mode (Linear or Circular)
-    ///
-    /// # Example
-    /// ```rust
-    /// use holon::{Holon, ScalarMode};
-    /// let holon = Holon::new(4096);
-    /// // Linear encoding - nearby values are similar
-    /// let v100 = holon.encode_scalar(100.0, ScalarMode::Linear { scale: 10000.0 });
-    /// let v110 = holon.encode_scalar(110.0, ScalarMode::Linear { scale: 10000.0 });
-    /// // v100 and v110 have high similarity
-    ///
-    /// // Circular encoding - values wrap (hour 23 similar to hour 0)
-    /// let h23 = holon.encode_scalar(23.0, ScalarMode::Circular { period: 24.0 });
-    /// let h0 = holon.encode_scalar(0.0, ScalarMode::Circular { period: 24.0 });
-    /// ```
-    pub fn encode_scalar(&self, value: f64, mode: ScalarMode) -> Vector {
-        self.scalar_encoder.encode(value, mode)
-    }
-
-    /// Encode a scalar on log scale.
-    ///
-    /// Equal ratios have equal similarity:
-    /// - 100 → 1000 has same similarity drop as 1000 → 10000
-    ///
-    /// Perfect for rates, frequencies, and other multiplicative quantities.
-    pub fn encode_scalar_log(&self, value: f64) -> Vector {
-        self.scalar_encoder.encode_log(value)
-    }
-
-    /// Encode a sequence of items.
-    ///
-    /// # Arguments
-    /// * `items` - Slice of string items to encode
-    /// * `mode` - How to encode the sequence (Bundle, Positional, Chained, Ngram)
-    ///
-    /// # Example
-    /// ```rust
-    /// use holon::{Holon, SequenceMode};
-    /// let holon = Holon::new(4096);
-    /// // Order-preserving
-    /// let seq = holon.encode_sequence(&["A", "B", "C"], SequenceMode::Positional);
-    ///
-    /// // Order-independent (bag of items)
-    /// let bag = holon.encode_sequence(&["A", "B", "C"], SequenceMode::Bundle);
-    ///
-    /// // N-gram patterns
-    /// let ngrams = holon.encode_sequence(&["A", "B", "C"], SequenceMode::Ngram { n: 2 });
-    /// ```
-    pub fn encode_sequence(&self, items: &[&str], mode: SequenceMode) -> Vector {
-        self.encoder.encode_sequence(items, mode)
-    }
-
-    /// Encode any type implementing the Walkable trait.
-    ///
-    /// This is the zero-serialization path: no JSON conversion needed.
-    /// Your structs implement the Walkable trait and get encoded directly.
-    ///
-    /// # Example
-    /// ```rust
-    /// use holon::{Holon, Walkable, WalkType, WalkableValue};
-    ///
-    /// struct Packet {
-    ///     protocol: String,
-    ///     src_port: u16,
-    ///     dst_port: u16,
-    /// }
-    ///
-    /// impl Walkable for Packet {
-    ///     fn walk_type(&self) -> WalkType { WalkType::Map }
-    ///     fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> {
-    ///         vec![
-    ///             ("protocol", self.protocol.to_walkable_value()),
-    ///             ("src_port", (self.src_port as i64).to_walkable_value()),
-    ///             ("dst_port", (self.dst_port as i64).to_walkable_value()),
-    ///         ]
-    ///     }
-    /// }
-    ///
-    /// let holon = Holon::new(4096);
-    /// let packet = Packet { protocol: "TCP".into(), src_port: 443, dst_port: 8080 };
-    /// let vec = holon.encode_walkable(&packet);
-    /// ```
-    pub fn encode_walkable<W: Walkable>(&self, walkable: &W) -> Vector {
-        self.encoder.encode_walkable(walkable)
-    }
-
-    /// Encode a WalkableValue directly.
-    ///
-    /// Useful when you have dynamically constructed WalkableValues
-    /// rather than typed structs.
-    pub fn encode_walkable_value(&self, value: &WalkableValue) -> Vector {
-        self.encoder.encode_walkable_value(value)
-    }
-
-    // =========================================================================
-    // VSA Primitives
-    // =========================================================================
-
-    /// Bind two vectors (AND-like association).
-    ///
-    /// Creates a vector representing the association between two concepts.
-    /// `bind(A, B)` is similar to neither A nor B individually.
-    /// `unbind(bind(A, B), A) ≈ B`
-    pub fn bind(&self, a: &Vector, b: &Vector) -> Vector {
-        Primitives::bind(a, b)
-    }
-
-    /// Unbind to retrieve associated value (inverse of bind).
-    ///
-    /// If `bound = bind(key, value)`, then `unbind(bound, key) ≈ value`.
-    pub fn unbind(&self, bound: &Vector, key: &Vector) -> Vector {
-        // For bipolar vectors, unbinding is the same as binding (self-inverse)
-        Primitives::bind(bound, key)
-    }
-
-    /// Bundle multiple vectors (OR-like superposition).
-    ///
-    /// Creates a vector similar to ALL input vectors.
-    pub fn bundle(&self, vectors: &[&Vector]) -> Vector {
-        Primitives::bundle(vectors)
-    }
-
-    /// Remove a component's influence from a superposition (NOT operation).
-    ///
-    /// Uses the default "subtract" method. See `negate_with_method` for alternatives.
-    ///
-    /// # Example
-    /// ```rust
-    /// use holon::Holon;
-    /// let holon = Holon::new(4096);
-    /// let a = holon.get_vector("a");
-    /// let b = holon.get_vector("b");
-    /// let c = holon.get_vector("c");
-    /// let abc = holon.bundle(&[&a, &b, &c]);
-    /// let ac = holon.negate(&abc, &b);
-    /// // similarity(ac, b) < 0 (negative similarity)
-    /// ```
-    pub fn negate(&self, superposition: &Vector, component: &Vector) -> Vector {
-        Primitives::negate(superposition, component)
-    }
-
-    /// Remove a component with a specific negation method.
-    ///
-    /// Methods:
-    /// - `Subtract` (default): Subtract component values, clamp to [-1, 1]
-    /// - `Zero`: Zero out positions where component is non-zero
-    /// - `Invert`: Add the inverted component
-    pub fn negate_with_method(
-        &self,
-        superposition: &Vector,
-        component: &Vector,
-        method: NegateMethod,
-    ) -> Vector {
-        Primitives::negate_with_method(superposition, component, method)
-    }
-
-    /// Strengthen a component's presence in a superposition.
-    pub fn amplify(&self, superposition: &Vector, component: &Vector, strength: f64) -> Vector {
-        Primitives::amplify(superposition, component, strength)
-    }
-
-    /// Extract the common pattern from a set of vectors.
-    ///
-    /// Keeps only dimensions where a majority of vectors agree.
-    pub fn prototype(&self, vectors: &[&Vector], threshold: f64) -> Vector {
-        Primitives::prototype(vectors, threshold)
-    }
-
-    /// Compute what changed between two states.
-    ///
-    /// Returns a vector highlighting additions (positive) and removals (negative).
-    pub fn difference(&self, before: &Vector, after: &Vector) -> Vector {
-        Primitives::difference(before, after)
-    }
-
-    /// Weighted interpolation between two vectors.
-    ///
-    /// `alpha = 0.0` returns vec1, `alpha = 1.0` returns vec2.
-    pub fn blend(&self, vec1: &Vector, vec2: &Vector, alpha: f64) -> Vector {
-        Primitives::blend(vec1, vec2, alpha)
-    }
-
-    /// Extract the part of vec that resonates with reference.
-    ///
-    /// Keeps only dimensions where both vectors agree.
-    pub fn resonance(&self, vec: &Vector, reference: &Vector) -> Vector {
-        Primitives::resonance(vec, reference)
-    }
-
-    /// Circular shift (permutation) of vector dimensions.
-    pub fn permute(&self, vec: &Vector, k: i32) -> Vector {
-        Primitives::permute(vec, k)
-    }
-
-    /// Cleanup: find the closest vector in a codebook.
-    ///
-    /// Returns the index and similarity of the best match, or None if codebook is empty.
-    pub fn cleanup(&self, noisy: &Vector, codebook: &[Vector]) -> Option<(usize, f64)> {
-        Primitives::cleanup(noisy, codebook)
-    }
-
-    /// Incremental prototype update.
-    ///
-    /// Updates an existing prototype with a new example.
-    /// `count` is the number of examples already in the prototype.
-    pub fn prototype_add(&self, prototype: &Vector, example: &Vector, count: usize) -> Vector {
-        Primitives::prototype_add(prototype, example, count)
-    }
-
-    // =========================================================================
-    // Accumulator Operations (Streaming)
-    // =========================================================================
-
-    /// Create a new empty accumulator for streaming operations.
-    ///
-    /// Accumulators preserve frequency information, making them ideal for
-    /// anomaly detection where high-frequency patterns should dominate.
-    pub fn create_accumulator(&self) -> Accumulator {
-        Accumulator::new(self.dimensions)
-    }
-
-    /// Add an example to a running accumulator WITHOUT thresholding.
-    ///
-    /// Patterns seen 99 times contribute 99x more than patterns seen once.
-    pub fn accumulate(&self, accumulator: &mut Accumulator, example: &Vector) {
-        accumulator.add(example);
-    }
-
-    /// Normalize an accumulator for similarity queries.
-    ///
-    /// Returns a unit-normalized vector suitable for cosine similarity.
-    pub fn normalize_accumulator(&self, accumulator: &Accumulator) -> Vector {
-        accumulator.normalize()
-    }
-
-    /// Threshold an accumulator to bipolar {-1, 0, 1}.
-    pub fn threshold_accumulator(&self, accumulator: &Accumulator) -> Vector {
-        accumulator.threshold()
-    }
-
-    // =========================================================================
-    // Similarity
-    // =========================================================================
-
-    /// Compute similarity between two vectors using cosine similarity.
-    pub fn similarity(&self, a: &Vector, b: &Vector) -> f64 {
-        Similarity::cosine(a, b)
-    }
-
-    /// Compute similarity with a specific metric.
-    pub fn similarity_with_metric(&self, a: &Vector, b: &Vector, metric: Metric) -> f64 {
-        Similarity::compute(a, b, metric)
-    }
-
-    /// Compute Minkowski (Lp) similarity.
-    ///
-    /// Generalized distance metric: p=1 is Manhattan, p=2 is Euclidean.
-    /// Returns 1 / (1 + distance).
-    pub fn minkowski_similarity(&self, a: &Vector, b: &Vector, p: f64) -> f64 {
-        Similarity::minkowski(a, b, p)
-    }
-
-    /// Compute weighted cosine similarity with per-dimension weights.
-    pub fn weighted_cosine_similarity(&self, a: &Vector, b: &Vector, weights: &[f64]) -> f64 {
-        Similarity::weighted_cosine(a, b, weights)
-    }
-
-    /// Compute weighted Euclidean similarity with per-dimension weights.
-    ///
-    /// Returns 1 / (1 + weighted_distance).
-    pub fn weighted_euclidean_similarity(&self, a: &Vector, b: &Vector, weights: &[f64]) -> f64 {
-        Similarity::weighted_euclidean(a, b, weights)
-    }
-
-    // =========================================================================
-    // Vector Manager Utilities
-    // =========================================================================
-
-    /// Get a deterministic position vector for sequence encoding.
-    ///
-    /// Useful for custom positional encoding outside of `encode_sequence`.
-    pub fn get_position_vector(&self, position: i64) -> Vector {
-        self.vector_manager.get_position_vector(position)
-    }
-
-    /// Export the atom codebook for persistence or distribution.
-    ///
-    /// Returns atom names mapped to their raw vector data.
-    pub fn export_codebook(&self) -> std::collections::HashMap<String, Vec<i8>> {
-        self.vector_manager.export_codebook()
-    }
-
-    /// Import a previously exported codebook.
-    pub fn import_codebook(&self, codebook: std::collections::HashMap<String, Vec<i8>>) {
-        self.vector_manager.import_codebook(codebook)
-    }
-
-    // =========================================================================
-    // Vector Operations
-    // =========================================================================
-
-    /// Keep only the k dimensions with the largest absolute values.
-    ///
-    /// Zeroes out all other dimensions for noise resistance.
-    pub fn sparsify(&self, vec: &Vector, k: usize) -> Vector {
-        Primitives::sparsify(vec, k)
-    }
-
-    /// Compute the true geometric average (centroid) of vectors.
-    pub fn centroid(&self, vectors: &[&Vector]) -> Vector {
-        Primitives::centroid(vectors)
-    }
-
-    /// Negate every element: +1 → -1, -1 → +1, 0 → 0.
-    pub fn flip(&self, vec: &Vector) -> Vector {
-        Primitives::flip(vec)
-    }
-
-    /// Find the k most similar vectors to a query from candidates.
-    ///
-    /// Returns (index, similarity) tuples sorted by similarity descending.
-    pub fn topk_similar(&self, query: &Vector, candidates: &[Vector], k: usize) -> Vec<(usize, f64)> {
-        Primitives::topk_similar(query, candidates, k)
-    }
-
-    /// Compute all pairwise similarities for a set of vectors.
-    ///
-    /// Returns a flattened n×n matrix (row-major).
-    pub fn similarity_matrix(&self, vectors: &[Vector]) -> Vec<f64> {
-        Primitives::similarity_matrix(vectors)
-    }
-
-    /// Information-theoretic entropy of the vector's element distribution.
-    ///
-    /// Normalized to [0, 1].
-    pub fn entropy(&self, vec: &Vector) -> f64 {
-        Primitives::entropy(vec)
-    }
-
-    /// Reduce dimensionality via random projection (Johnson-Lindenstrauss).
-    pub fn random_project(&self, vec: &Vector, target_dims: usize, seed: u64) -> Vector {
-        Primitives::random_project(vec, target_dims, seed)
-    }
-
-    /// Fractional binding: raise a vector to a real-valued power.
-    pub fn power(&self, vec: &Vector, exponent: f64) -> Vector {
-        Primitives::power(vec, exponent)
-    }
-
-    /// Compute similarity of a vector stream with itself at different lags.
-    ///
-    /// Peaks at lag k indicate period-k patterns.
-    pub fn autocorrelate(&self, stream: &[Vector], max_lag: usize) -> Vec<f64> {
-        Primitives::autocorrelate(stream, max_lag)
-    }
-
-    /// Compute similarity between two vector streams at different offsets.
-    ///
-    /// Detects causal relationships between streams.
-    pub fn cross_correlate(&self, stream_a: &[Vector], stream_b: &[Vector], max_lag: usize) -> Vec<f64> {
-        Primitives::cross_correlate(stream_a, stream_b, max_lag)
-    }
-
-    // =========================================================================
-    // Advanced Operations
-    // =========================================================================
-
-    /// Orthogonal complement of project: everything NOT explained by the subspace.
-    ///
-    /// While `project` extracts what's IN the subspace,
-    /// `reject` extracts what's OUTSIDE it — the residual signal.
-    pub fn reject(&self, vec: &Vector, subspace: &[&Vector], orthogonalize: bool) -> Vector {
-        Primitives::reject(vec, subspace, orthogonalize)
-    }
-
-    /// Bundle vectors and return per-dimension agreement margins.
-    ///
-    /// Returns `(bundled_vector, confidence_margins)`.
-    pub fn bundle_with_confidence(&self, vectors: &[&Vector]) -> (Vector, Vec<f64>) {
-        Primitives::bundle_with_confidence(vectors)
-    }
-
-    /// Mean pairwise cosine similarity (cluster tightness).
-    ///
-    /// 1.0 = identical, 0.0 = orthogonal, negative = anti-correlated.
-    pub fn coherence(&self, vectors: &[Vector]) -> f64 {
-        Primitives::coherence(vectors)
-    }
-
-    /// Grover's diffusion operator: reflect vector about its mean value.
-    pub fn reflect_about_mean(&self, vec: &Vector) -> Vector {
-        Primitives::reflect_about_mean(vec)
-    }
-
-    /// Quantum-inspired iterative amplitude amplification.
-    ///
-    /// Amplifies a weak signal buried in a strong background.
-    pub fn grover_amplify(&self, signal: &Vector, background: &Vector, iterations: usize) -> Vector {
-        Primitives::grover_amplify(signal, background, iterations)
-    }
-
-    /// Temporal derivative of similarity in a vector stream.
-    ///
-    /// Returns drift rates (positive = converging, negative = diverging).
-    pub fn drift_rate(&self, stream: &[Vector], window: usize) -> Vec<f64> {
-        Primitives::drift_rate(stream, window)
-    }
-
-    /// Convert cosine similarity to statistical significance (z-score).
-    pub fn significance(&self, similarity: f64) -> f64 {
-        Similarity::significance(similarity, self.dimensions)
-    }
-
-    /// Decode a scalar value from a log-scale encoded vector.
-    ///
-    /// Inverse of `encode_scalar_log`. Uses grid search with refinement.
-    pub fn decode_scalar_log(&self, vec: &Vector) -> f64 {
-        self.scalar_encoder.decode_log(vec, 1e-2, 1e10, 500, 200)
-    }
-
-    /// Decode a scalar value from a log-scale encoded vector with custom range.
-    pub fn decode_scalar_log_range(&self, vec: &Vector, lo: f64, hi: f64) -> f64 {
-        self.scalar_encoder.decode_log(vec, lo, hi, 500, 200)
-    }
-
-    /// Estimate how close an accumulator is to saturation.
-    ///
-    /// Returns remaining capacity as a fraction in [0.0, 1.0].
-    pub fn accumulator_capacity(&self, accumulator: &Accumulator, codebook_size: usize) -> f64 {
-        accumulator.capacity(codebook_size)
-    }
-
-    /// Quantum-inspired purity measure for an accumulator.
-    ///
-    /// High purity = single concept; low purity = diffuse superposition.
-    pub fn accumulator_purity(&self, accumulator: &Accumulator) -> f64 {
-        accumulator.purity()
-    }
-
-    /// Participation ratio: effective number of active dimensions.
-    pub fn accumulator_participation_ratio(&self, accumulator: &Accumulator) -> f64 {
-        accumulator.participation_ratio()
-    }
-
-    // =========================================================================
-    // Memory Layer
-    // =========================================================================
-
-    /// Create an [`OnlineSubspace`] with this Holon's dimensionality.
-    ///
-    /// The subspace learns the low-dimensional manifold of "normal" vectors and
-    /// scores new vectors by their residual distance (anomaly score).
-    ///
-    /// # Example
-    /// ```rust
-    /// use holon::Holon;
-    /// let holon = Holon::new(4096);
-    /// let mut subspace = holon.create_subspace(32);
-    /// // train: subspace.update(&some_vector.to_f64());
-    /// // score: let residual = subspace.residual(&probe.to_f64());
-    /// ```
-    pub fn create_subspace(&self, k: usize) -> OnlineSubspace {
-        OnlineSubspace::new(self.dimensions, k)
-    }
-
-    /// Create an [`EngramLibrary`] keyed to this Holon's dimensionality.
-    ///
-    /// # Example
-    /// ```rust
-    /// use holon::Holon;
-    /// let holon = Holon::new(4096);
-    /// let mut library = holon.create_engram_library();
-    /// ```
-    pub fn create_engram_library(&self) -> EngramLibrary {
-        EngramLibrary::new(self.dimensions)
-    }
-
-    // =========================================================================
-    // Extended Algebra
-    // =========================================================================
-
-    /// Return similarity as a VECTOR, not a scalar.
-    ///
-    /// Preserves dimension-wise agreement pattern.
-    pub fn similarity_profile(&self, a: &Vector, b: &Vector) -> Vector {
-        Primitives::similarity_profile(a, b)
-    }
-
-    /// Weighted resonance - soft attention in VSA algebra.
-    pub fn attend(&self, query: &Vector, memory: &Vector, strength: f64, mode: AttendMode) -> Vector {
-        Primitives::attend(query, memory, strength, mode)
-    }
-
-    /// Relational transfer: A is to B as C is to ?
-    pub fn analogy(&self, a: &Vector, b: &Vector, c: &Vector) -> Vector {
-        Primitives::analogy(a, b, c)
-    }
-
-    /// Project vector onto subspace defined by exemplars.
-    pub fn project(&self, vec: &Vector, subspace: &[&Vector], orthogonalize: bool) -> Vector {
-        Primitives::project(vec, subspace, orthogonalize)
-    }
-
-    /// Bind only where condition is met (gated binding).
-    pub fn conditional_bind(
-        &self,
-        a: &Vector,
-        b: &Vector,
-        gate: &Vector,
-        mode: GateMode,
-    ) -> Vector {
-        Primitives::conditional_bind(a, b, gate, mode)
-    }
-
-    /// Measure the "complexity" or "mixedness" of a vector.
-    pub fn complexity(&self, vec: &Vector) -> f64 {
-        Primitives::complexity(vec)
-    }
-
-    /// Reconstruct components from a vector using a codebook.
-    pub fn invert(
-        &self,
-        vec: &Vector,
-        codebook: &[Vector],
-        top_k: usize,
-        threshold: f64,
-    ) -> Vec<(usize, f64)> {
-        Primitives::invert(vec, codebook, top_k, threshold)
-    }
-
-    /// Find structural breakpoints in a vector stream.
-    pub fn segment(
-        &self,
-        stream: &[Vector],
-        window: usize,
-        threshold: f64,
-        method: SegmentMethod,
-    ) -> Vec<usize> {
-        Primitives::segment(stream, window, threshold, method)
-    }
-}
-
-impl Default for Holon {
-    fn default() -> Self {
-        Self::new(4096)
-    }
-}
+pub use kernel::{ScalarRef, ScalarValue, TimeResolution, WalkType, Walkable, WalkableRef, WalkableValue};
+pub use memory::{Engram, EngramLibrary, OnlineSubspace};
 
 #[cfg(test)]
 mod tests {
@@ -751,7 +104,6 @@ mod tests {
         let ab = holon.bind(&a, &b);
         let b_recovered = holon.unbind(&ab, &a);
 
-        // Recovered should be similar to original
         let sim = holon.similarity(&b_recovered, &b);
         assert!(sim > 0.5, "Expected high similarity, got {}", sim);
     }
@@ -766,7 +118,6 @@ mod tests {
 
         let abc = holon.bundle(&[&a, &b, &c]);
 
-        // Bundle should be similar to all components
         assert!(holon.similarity(&abc, &a) > 0.3);
         assert!(holon.similarity(&abc, &b) > 0.3);
         assert!(holon.similarity(&abc, &c) > 0.3);
@@ -783,7 +134,6 @@ mod tests {
         let abc = holon.bundle(&[&a, &b, &c]);
         let ac = holon.negate(&abc, &b);
 
-        // After negation, B should have lower similarity
         assert!(holon.similarity(&ac, &b) < holon.similarity(&abc, &b));
     }
 
@@ -796,7 +146,6 @@ mod tests {
 
         let mut accum = holon.create_accumulator();
 
-        // Add common 10 times, rare once
         for _ in 0..10 {
             holon.accumulate(&mut accum, &common);
         }
@@ -804,7 +153,6 @@ mod tests {
 
         let baseline = holon.normalize_accumulator(&accum);
 
-        // Common should have higher similarity
         let sim_common = holon.similarity(&common, &baseline);
         let sim_rare = holon.similarity(&rare, &baseline);
 
@@ -826,7 +174,6 @@ mod tests {
         let ab = holon.bundle(&[&a, &b]);
         let amplified = holon.amplify(&ab, &a, 2.0);
 
-        // After amplification, A should have higher similarity
         assert!(holon.similarity(&amplified, &a) > holon.similarity(&ab, &a));
     }
 
@@ -834,14 +181,12 @@ mod tests {
     fn test_prototype() {
         let holon = Holon::new(4096);
 
-        // Create vectors with common patterns
         let v1 = holon.encode_json(r#"{"type": "billing", "a": 1}"#).unwrap();
         let v2 = holon.encode_json(r#"{"type": "billing", "b": 2}"#).unwrap();
         let v3 = holon.encode_json(r#"{"type": "billing", "c": 3}"#).unwrap();
 
         let proto = holon.prototype(&[&v1, &v2, &v3], 0.5);
 
-        // Prototype should be similar to all inputs
         assert!(holon.similarity(&proto, &v1) > 0.2);
         assert!(holon.similarity(&proto, &v2) > 0.2);
         assert!(holon.similarity(&proto, &v3) > 0.2);
@@ -855,12 +200,10 @@ mod tests {
         let b = holon.get_vector("pattern_b");
         let c = holon.get_vector("pattern_c");
 
-        // Incremental prototype building
         let proto1 = a.clone();
         let proto2 = holon.prototype_add(&proto1, &b, 1);
         let proto3 = holon.prototype_add(&proto2, &c, 2);
 
-        // Final prototype should have some similarity to all inputs
         assert!(holon.similarity(&proto3, &a) > 0.0);
         assert!(holon.similarity(&proto3, &b) > 0.0);
         assert!(holon.similarity(&proto3, &c) > 0.0);
@@ -876,7 +219,6 @@ mod tests {
 
         let codebook = vec![a.clone(), b.clone(), c.clone()];
 
-        // Noisy version of A (bundle with some noise)
         let noise = holon.get_vector("noise");
         let noisy_a = holon.bundle(&[&a, &a, &a, &noise]);
 
@@ -895,7 +237,6 @@ mod tests {
 
         let diff = holon.difference(&before, &after);
 
-        // Difference should be non-zero
         assert!(diff.nnz() > 0);
     }
 
@@ -910,13 +251,8 @@ mod tests {
         let blend_1 = holon.blend(&a, &b, 1.0);
         let blend_half = holon.blend(&a, &b, 0.5);
 
-        // blend(a, b, 0) should be similar to a
         assert!(holon.similarity(&blend_0, &a) > 0.9);
-
-        // blend(a, b, 1) should be similar to b
         assert!(holon.similarity(&blend_1, &b) > 0.9);
-
-        // blend at 0.5 should be somewhat similar to both
         assert!(holon.similarity(&blend_half, &a) > 0.3);
         assert!(holon.similarity(&blend_half, &b) > 0.3);
     }
@@ -931,7 +267,6 @@ mod tests {
         let ab = holon.bundle(&[&a, &b]);
         let resonant = holon.resonance(&ab, &a);
 
-        // Resonance with A should increase similarity to A
         assert!(holon.similarity(&resonant, &a) >= holon.similarity(&ab, &a) - 0.1);
     }
 
@@ -944,7 +279,6 @@ mod tests {
         let permuted = holon.permute(&v, 10);
         let restored = holon.permute(&permuted, -10);
 
-        // Permute and inverse permute should restore original
         assert_eq!(v, restored);
     }
 
@@ -955,7 +289,6 @@ mod tests {
         let seq1 = holon.encode_sequence(&["A", "B", "C"], SequenceMode::Positional);
         let seq2 = holon.encode_sequence(&["C", "B", "A"], SequenceMode::Positional);
 
-        // Different order should produce different vectors
         let sim = holon.similarity(&seq1, &seq2);
         assert!(sim < 0.8, "Expected lower similarity for reversed, got {}", sim);
     }
@@ -967,7 +300,6 @@ mod tests {
         let seq1 = holon.encode_sequence(&["A", "B", "C"], SequenceMode::Bundle);
         let seq2 = holon.encode_sequence(&["C", "B", "A"], SequenceMode::Bundle);
 
-        // Same items should produce similar vectors regardless of order
         let sim = holon.similarity(&seq1, &seq2);
         assert!(sim > 0.9, "Expected high similarity for same items, got {}", sim);
     }
@@ -979,7 +311,6 @@ mod tests {
         let seq1 = holon.encode_sequence(&["A", "B", "C", "D"], SequenceMode::Ngram { n: 2 });
         let seq2 = holon.encode_sequence(&["A", "B", "X", "Y"], SequenceMode::Ngram { n: 2 });
 
-        // Shared "AB" bigram should give some similarity
         let sim = holon.similarity(&seq1, &seq2);
         assert!(sim > 0.1, "Expected some similarity from shared ngram, got {}", sim);
     }
@@ -988,8 +319,6 @@ mod tests {
     fn test_scalar_log_ratio_preservation() {
         let holon = Holon::new(4096);
 
-        // With bipolar quantization, small differences may get quantized away.
-        // Test that vectors at large magnitude differences are distinguishable.
         let v1 = holon.encode_scalar_log(1.0);
         let v100k = holon.encode_scalar_log(100_000.0);
         let v1b = holon.encode_scalar_log(1_000_000_000.0);
@@ -997,13 +326,11 @@ mod tests {
         let sim_1_100k = holon.similarity(&v1, &v100k);
         let sim_1_1b = holon.similarity(&v1, &v1b);
 
-        // Different magnitudes should produce different similarities
         assert!(
             sim_1_100k != sim_1_1b,
             "Expected different similarities for different magnitudes"
         );
 
-        // Self-similarity should be 1.0
         let self_sim = holon.similarity(&v1, &v1);
         assert!((self_sim - 1.0).abs() < 1e-10, "Self-similarity should be 1.0");
     }
@@ -1014,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_encode_walkable_custom_struct() {
-        use crate::walkable::{WalkType, Walkable, WalkableValue};
+        use crate::kernel::walkable::{WalkType, Walkable, WalkableValue};
 
         struct Packet {
             protocol: String,
@@ -1053,16 +380,13 @@ mod tests {
         let vec_tcp = holon.encode_walkable(&tcp);
         let vec_udp = holon.encode_walkable(&udp);
 
-        // Should produce valid vectors
         assert_eq!(vec_tcp.dimensions(), 4096);
         assert!(vec_tcp.nnz() > 0);
         assert!(vec_udp.nnz() > 0);
 
-        // Different packets should NOT be identical
         let sim = holon.similarity(&vec_tcp, &vec_udp);
         assert!(sim < 1.0, "Expected different vectors for different packets, got sim={}", sim);
 
-        // Same packet should be identical to itself
         let self_sim = holon.similarity(&vec_tcp, &vec_tcp);
         assert!((self_sim - 1.0).abs() < 0.01, "Self-similarity should be ~1.0, got {}", self_sim);
     }
@@ -1073,29 +397,24 @@ mod tests {
 
         let holon = Holon::new(4096);
 
-        // Encode via JSON
         let json_vec = holon
             .encode_json(r#"{"type": "billing", "amount": 100}"#)
             .unwrap();
 
-        // Encode via Walkable (using serde_json::Value which implements Walkable)
         let value = json!({"type": "billing", "amount": 100});
         let walkable_vec = holon.encode_walkable(&value);
 
-        // Both should produce similar results (not identical due to implementation details)
-        // but structurally equivalent
         assert_eq!(json_vec.dimensions(), walkable_vec.dimensions());
         assert!(json_vec.nnz() > 0);
         assert!(walkable_vec.nnz() > 0);
 
-        // Should have high similarity (same data structure)
         let sim = holon.similarity(&json_vec, &walkable_vec);
         assert!(sim > 0.8, "Expected high similarity between JSON and Walkable encoding, got {}", sim);
     }
 
     #[test]
     fn test_walkable_nested_struct() {
-        use crate::walkable::{WalkType, Walkable, WalkableValue, ScalarValue};
+        use crate::kernel::walkable::{WalkType, Walkable, WalkableValue, ScalarValue};
 
         struct Address {
             city: String,
@@ -1154,7 +473,6 @@ mod tests {
         let vec_alice = holon.encode_walkable(&alice);
         let vec_bob = holon.encode_walkable(&bob);
 
-        // Same city/zip should give some similarity (shared fields)
         let sim = holon.similarity(&vec_alice, &vec_bob);
         assert!(sim > 0.1, "Expected some similarity from shared address, got {}", sim);
         assert!(sim < 1.0, "Different people should not be identical, got {}", sim);
@@ -1179,15 +497,13 @@ mod tests {
 
         let a = holon.get_vector("A");
 
-        // Test different metrics with self-similarity
         let cos = holon.similarity_with_metric(&a, &a, Metric::Cosine);
         let ham = holon.similarity_with_metric(&a, &a, Metric::Hamming);
         let euc = holon.similarity_with_metric(&a, &a, Metric::Euclidean);
 
-        // Self-similarity should be maximal
         assert!((cos - 1.0).abs() < 1e-10);
         assert!((ham - 1.0).abs() < 1e-10);
-        assert!((euc - 1.0).abs() < 1e-10); // Distance 0 -> similarity 1
+        assert!((euc - 1.0).abs() < 1e-10);
     }
 
     // =========================================================================
@@ -1198,7 +514,6 @@ mod tests {
     fn test_anomaly_detection_workflow() {
         let holon = Holon::new(4096);
 
-        // Build baseline from normal patterns
         let mut baseline_accum = holon.create_accumulator();
 
         for i in 0..100 {
@@ -1211,12 +526,10 @@ mod tests {
 
         let baseline = holon.normalize_accumulator(&baseline_accum);
 
-        // Test normal request
         let normal_test = holon.encode_json(
             r#"{"type": "request", "endpoint": "/api/users", "status": 200}"#
         ).unwrap();
 
-        // Test anomalous request
         let anomaly_test = holon.encode_json(
             r#"{"type": "request", "endpoint": "/admin/delete_all", "status": 500}"#
         ).unwrap();
@@ -1224,7 +537,6 @@ mod tests {
         let sim_normal = holon.similarity(&normal_test, &baseline);
         let sim_anomaly = holon.similarity(&anomaly_test, &baseline);
 
-        // Normal should have higher similarity to baseline
         assert!(
             sim_normal > sim_anomaly,
             "Expected normal > anomaly, got {} vs {}",
@@ -1237,11 +549,9 @@ mod tests {
     fn test_rate_based_anomaly_detection() {
         let holon = Holon::new(4096);
 
-        // Build baseline from normal rates
         let mut rate_accum = holon.create_accumulator();
 
         for _ in 0..50 {
-            // Normal rate: ~100 pps with some variation
             let rate = 100.0 + (rand::random::<f64>() - 0.5) * 20.0;
             let rate_vec = holon.encode_scalar_log(rate);
             holon.accumulate(&mut rate_accum, &rate_vec);
@@ -1249,9 +559,7 @@ mod tests {
 
         let rate_baseline = holon.normalize_accumulator(&rate_accum);
 
-        // Test normal rate
         let normal_rate = holon.encode_scalar_log(105.0);
-        // Test anomalous rate (DDoS-like)
         let anomaly_rate = holon.encode_scalar_log(100000.0);
 
         let sim_normal = holon.similarity(&normal_rate, &rate_baseline);
@@ -1263,5 +571,22 @@ mod tests {
             sim_normal,
             sim_anomaly
         );
+    }
+
+    #[test]
+    fn test_kernel_direct_imports() {
+        use crate::kernel::{Encoder, VectorManager, Primitives, Similarity};
+
+        let vm = VectorManager::new(4096);
+        let enc = Encoder::new(vm.clone());
+
+        let a = enc.encode_json(r#"{"role": "admin"}"#).unwrap();
+        let b = enc.encode_json(r#"{"role": "user"}"#).unwrap();
+
+        let sim = Similarity::cosine(&a, &b);
+        assert!(sim < 1.0);
+
+        let bound = Primitives::bind(&a, &b);
+        assert!(bound.nnz() > 0);
     }
 }

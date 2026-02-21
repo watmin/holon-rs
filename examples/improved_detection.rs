@@ -5,7 +5,8 @@
 //!
 //! Run: cargo run --example improved_detection
 
-use holon::{Holon, Primitives, SegmentMethod, Vector};
+use holon::highlevel::Holon;
+use holon::kernel::{Primitives, SegmentMethod, Vector};
 use rand::prelude::*;
 use std::collections::HashMap;
 

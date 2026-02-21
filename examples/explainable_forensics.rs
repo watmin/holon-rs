@@ -15,7 +15,8 @@
 //!
 //! Run: cargo run --example explainable_forensics
 
-use holon::{AttendMode, GateMode, Holon, Primitives, SegmentMethod, Vector};
+use holon::highlevel::Holon;
+use holon::kernel::{AttendMode, GateMode, Primitives, SegmentMethod, Vector};
 
 // =============================================================================
 // TRAFFIC GENERATION

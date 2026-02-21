@@ -6,9 +6,11 @@
 //!
 //! Run: cargo run --example config_drift_remediation --release
 
-use holon::memory::OnlineSubspace;
-use holon::primitives::Primitives;
-use holon::{Holon, ScalarValue, WalkType, Walkable, WalkableValue};
+use holon::kernel::{
+    Encoder, Primitives, VectorManager, Vector,
+    ScalarValue, WalkType, Walkable, WalkableValue,
+};
+use holon::memory::{EngramLibrary, OnlineSubspace};
 use rand::prelude::*;
 use std::collections::HashMap;
 
@@ -102,17 +104,17 @@ const FIELDS: &[(&str, RevertFn)] = &[
 ];
 
 fn attribute_drift(
-    holon: &Holon,
+    encoder: &Encoder,
     subspace: &OnlineSubspace,
     drifted: &Config,
     golden: &Config,
 ) -> Vec<(&'static str, f64)> {
-    let base = subspace.residual(&holon.encode_walkable(drifted).to_f64());
+    let base = subspace.residual(&encoder.encode_walkable(drifted).to_f64());
     let mut results: Vec<(&'static str, f64)> = FIELDS
         .iter()
         .filter_map(|(name, revert)| {
             let candidate = revert(drifted, golden);
-            let new_res = subspace.residual(&holon.encode_walkable(&candidate).to_f64());
+            let new_res = subspace.residual(&encoder.encode_walkable(&candidate).to_f64());
             let drop = base - new_res;
             if drop > 0.5 { Some((*name, drop)) } else { None }
         })
@@ -185,7 +187,8 @@ fn print_header(title: &str) {
 fn main() -> holon::Result<()> {
     print_header("CONFIG DRIFT REMEDIATION\n  Detect, Attribute, and Fix — No Schema Required");
 
-    let holon = Holon::with_seed(4096, 42);
+    let vm = VectorManager::with_seed(4096, 42);
+    let encoder = Encoder::new(vm);
     let mut rng = StdRng::seed_from_u64(42);
 
     // =========================================================================
@@ -194,8 +197,8 @@ fn main() -> holon::Result<()> {
     println!("\nLearning golden config manifold (20 configs × 10 passes)...");
 
     let stable: Vec<Config> = (0..20).map(|_| stable_config(&mut rng)).collect();
-    let stable_vecs: Vec<holon::Vector> = stable.iter().map(|c| holon.encode_walkable(c)).collect();
-    let stable_refs: Vec<&holon::Vector> = stable_vecs.iter().collect();
+    let stable_vecs: Vec<Vector> = stable.iter().map(|c| encoder.encode_walkable(c)).collect();
+    let stable_refs: Vec<&Vector> = stable_vecs.iter().collect();
     let golden_proto = Primitives::prototype(&stable_refs, 0.5);
     let golden_ref = stable[0].clone();
 
@@ -206,7 +209,7 @@ fn main() -> holon::Result<()> {
         }
     }
 
-    let mut library = holon.create_engram_library();
+    let mut library = EngramLibrary::new(4096);
     library.add("golden_config", &subspace, None, HashMap::new());
 
     let train_residuals: Vec<f64> = stable_vecs.iter().map(|v| subspace.residual(&v.to_f64())).collect();
@@ -230,7 +233,7 @@ fn main() -> holon::Result<()> {
         // Generate a fresh base config for each scenario (distinct from training data)
         let base_cfg = stable_config(&mut rng);
         let drifted = (drift.apply)(&base_cfg);
-        let drifted_vec = holon.encode_walkable(&drifted);
+        let drifted_vec = encoder.encode_walkable(&drifted);
         let residual = subspace.residual(&drifted_vec.to_f64());
         let is_drift = residual > subspace.threshold();
 
@@ -248,7 +251,7 @@ fn main() -> holon::Result<()> {
             detected += 1;
 
             // Attribution
-            let attrs = attribute_drift(&holon, &subspace, &drifted, &golden_ref);
+            let attrs = attribute_drift(&encoder, &subspace, &drifted, &golden_ref);
             for (i, (field, drop)) in attrs.iter().take(3).enumerate() {
                 println!(
                     "  Cause {} : '{}' (residual drop {:.2} when reverted)",
@@ -262,7 +265,7 @@ fn main() -> holon::Result<()> {
             let rem_residual = subspace.residual(&remediation.to_f64());
 
             // Verify with the actual correct base config
-            let correct_vec = holon.encode_walkable(&base_cfg);
+            let correct_vec = encoder.encode_walkable(&base_cfg);
             let correct_residual = subspace.residual(&correct_vec.to_f64());
 
             println!(

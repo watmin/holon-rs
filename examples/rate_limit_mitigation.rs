@@ -10,7 +10,8 @@
 //!
 //! Run: cargo run --example rate_limit_mitigation
 
-use holon::{Holon, Accumulator, Vector, Walkable, WalkType, WalkableValue, ScalarValue};
+use holon::highlevel::Holon;
+use holon::kernel::{Accumulator, Vector, Walkable, WalkType, WalkableValue, ScalarValue};
 use std::collections::HashMap;
 
 // =============================================================================

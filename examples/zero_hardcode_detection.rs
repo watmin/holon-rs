@@ -19,7 +19,7 @@
 //!
 //! Run: cargo run --example zero_hardcode_detection --release --features simd
 
-use holon::Holon;
+use holon::highlevel::Holon;
 use std::collections::VecDeque;
 
 // =============================================================================
