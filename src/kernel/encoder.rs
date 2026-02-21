@@ -43,6 +43,15 @@ impl Encoder {
         self.vector_manager.dimensions()
     }
 
+    /// Get the deterministic vector for an atomic value.
+    ///
+    /// Delegates to the underlying [`VectorManager`]; results are cached
+    /// across all `Encoder` / `VectorManager` clones that share the same
+    /// `Arc`-backed store.
+    pub fn get_vector(&self, atom: &str) -> Vector {
+        self.vector_manager.get_vector(atom)
+    }
+
     /// Encode a JSON string into a vector.
     ///
     /// # Example
