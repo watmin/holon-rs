@@ -301,6 +301,13 @@ impl EngramLibrary {
         results
     }
 
+    /// Insert a clone of an existing engram under the given name.
+    pub fn add_from_engram(&mut self, name: &str, engram: &Engram) {
+        let mut cloned = engram.clone();
+        cloned.name = name.to_string();
+        self.engrams.insert(name.to_string(), cloned);
+    }
+
     /// Remove an engram by name. Returns `true` if it existed.
     pub fn remove(&mut self, name: &str) -> bool {
         self.engrams.remove(name).is_some()
