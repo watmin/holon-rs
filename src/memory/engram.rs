@@ -269,6 +269,38 @@ impl EngramLibrary {
         results
     }
 
+    /// Directional alignment matching against all stored engrams.
+    ///
+    /// Compares the principal component directions of a probe subspace
+    /// against each engram's stored subspace. This measures whether the
+    /// variance lives in the same part of the vector space — the
+    /// directional complement to [`match_spectrum`]'s magnitude comparison.
+    ///
+    /// Returns `Vec<(name, alignment_score)>` sorted descending (higher = better).
+    /// Alignment is in \[0, 1\]: 1.0 = same directions, 0.0 = orthogonal.
+    pub fn match_alignment(
+        &mut self,
+        probe_subspace: &OnlineSubspace,
+        top_k: usize,
+    ) -> Vec<(String, f64)> {
+        if self.engrams.is_empty() {
+            return vec![];
+        }
+
+        let mut results: Vec<(String, f64)> = self
+            .engrams
+            .iter_mut()
+            .map(|(name, engram)| {
+                let alignment = probe_subspace.subspace_alignment(engram.subspace(), 0);
+                (name.clone(), alignment)
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(top_k);
+        results
+    }
+
     /// Remove an engram by name. Returns `true` if it existed.
     pub fn remove(&mut self, name: &str) -> bool {
         self.engrams.remove(name).is_some()
@@ -439,6 +471,78 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_match_alignment() {
+        let dim = 256;
+
+        // Pattern A: signal in even dimensions
+        let mut sub_a = OnlineSubspace::new(dim, 8);
+        let mut rng_a = 42u64;
+        for _ in 0..200 {
+            rng_a = rng_a
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let coeff = (rng_a >> 33) as f64 / u32::MAX as f64 * 2.0 - 1.0;
+            let v: Vec<f64> = (0..dim)
+                .map(|i| if i % 2 == 0 { coeff } else { 0.0 })
+                .collect();
+            sub_a.update(&v);
+        }
+
+        // Pattern B: signal in dimensions divisible by 5
+        let mut sub_b = OnlineSubspace::new(dim, 8);
+        let mut rng_b = 999u64;
+        for _ in 0..200 {
+            rng_b = rng_b
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let coeff = (rng_b >> 33) as f64 / u32::MAX as f64 * 2.0 - 1.0;
+            let v: Vec<f64> = (0..dim)
+                .map(|i| if i % 5 == 0 { coeff } else { 0.0 })
+                .collect();
+            sub_b.update(&v);
+        }
+
+        let mut lib = EngramLibrary::new(dim);
+        lib.add("even", &sub_a, None, Default::default());
+        lib.add("fives", &sub_b, None, Default::default());
+
+        // Probe trained on even-dimension data should align better with "even"
+        let mut probe = OnlineSubspace::new(dim, 8);
+        let mut rng_p = 777u64;
+        for _ in 0..200 {
+            rng_p = rng_p
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let coeff = (rng_p >> 33) as f64 / u32::MAX as f64 * 2.0 - 1.0;
+            let v: Vec<f64> = (0..dim)
+                .map(|i| if i % 2 == 0 { coeff } else { 0.0 })
+                .collect();
+            probe.update(&v);
+        }
+
+        let matches = lib.match_alignment(&probe, 2);
+        assert_eq!(matches.len(), 2);
+        assert_eq!(
+            matches[0].0, "even",
+            "Probe from even-distribution should align best with 'even' engram"
+        );
+        assert!(
+            matches[0].1 >= matches[1].1,
+            "Results should be sorted descending: {} vs {}",
+            matches[0].1,
+            matches[1].1
+        );
+    }
+
+    #[test]
+    fn test_match_alignment_empty_library() {
+        let dim = 64;
+        let mut lib = EngramLibrary::new(dim);
+        let probe = OnlineSubspace::new(dim, 4);
+        assert!(lib.match_alignment(&probe, 3).is_empty());
     }
 
     #[test]

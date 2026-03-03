@@ -356,7 +356,76 @@ impl OnlineSubspace {
         }
     }
 
+    /// Measure directional alignment between two subspaces.
+    ///
+    /// Computes cosines of principal angles via SVD of the basis inner
+    /// product matrix. Focuses on the top principal angles — the best-
+    /// aligned directions — since minor components are typically noise.
+    ///
+    /// # Arguments
+    /// * `other` — subspace to compare against
+    /// * `top_angles` — number of top principal angles to average;
+    ///   0 = use `max(3, min(k_a, k_b) / 4)`
+    ///
+    /// Returns a value in \[0, 1\]: 1.0 = same directions, 0.0 = orthogonal.
+    ///
+    /// Cost: O(k · dim) for the basis product, O(k²) for the SVD.
+    pub fn subspace_alignment(&self, other: &OnlineSubspace, top_angles: usize) -> f64 {
+        let u = self.active_basis();
+        let v = other.active_basis();
+
+        if u.nrows() == 0 || v.nrows() == 0 {
+            return 0.0;
+        }
+
+        // M = U · Vᵀ  (active_u × active_v)
+        let m = u.dot(&v.t());
+
+        // Singular values from eigenvalues of MᵀM
+        let mtm = m.t().dot(&m);
+        let eigenvalues = jacobi_eigenvalues(&mtm);
+
+        let mut cos_angles: Vec<f64> = eigenvalues
+            .iter()
+            .map(|&e| e.max(0.0).sqrt().min(1.0))
+            .collect();
+        cos_angles.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+        let n = cos_angles.len();
+        if n == 0 {
+            return 0.0;
+        }
+
+        let top = if top_angles == 0 {
+            3usize.max(n / 4).min(n)
+        } else {
+            top_angles.min(n)
+        };
+
+        cos_angles[..top].iter().sum::<f64>() / top as f64
+    }
+
     // --- Private helpers ---
+
+    /// Unit-normalized basis vectors for active (non-zero-norm) components.
+    fn active_basis(&self) -> Array2<f64> {
+        let mut rows: Vec<Array1<f64>> = Vec::new();
+        for i in 0..self.k {
+            let v_norm = self.component_norm(i);
+            if v_norm > 1e-10 {
+                rows.push(self.components.row(i).to_owned() / v_norm);
+            }
+        }
+        if rows.is_empty() {
+            return Array2::zeros((0, self.dim));
+        }
+        let n = rows.len();
+        let mut basis = Array2::zeros((n, self.dim));
+        for (i, row) in rows.iter().enumerate() {
+            basis.row_mut(i).assign(row);
+        }
+        basis
+    }
 
     #[inline]
     fn component_norm(&self, i: usize) -> f64 {
@@ -407,6 +476,82 @@ impl OnlineSubspace {
 #[inline]
 fn norm(v: &[f64]) -> f64 {
     v.iter().map(|x| x * x).sum::<f64>().sqrt()
+}
+
+/// Eigenvalues of a small symmetric matrix via Jacobi rotations.
+///
+/// Returns eigenvalues sorted descending. Intended for k×k matrices
+/// where k is the number of active subspace components (typically 3–128),
+/// so O(k³) convergence is fine.
+fn jacobi_eigenvalues(a: &Array2<f64>) -> Vec<f64> {
+    let n = a.nrows();
+    debug_assert_eq!(n, a.ncols());
+    if n == 0 {
+        return vec![];
+    }
+
+    let mut s = a.clone();
+    let max_iter = 100 * n * n;
+    let tol = 1e-12;
+
+    for _ in 0..max_iter {
+        // Find largest off-diagonal element
+        let mut max_val = 0.0f64;
+        let mut p = 0;
+        let mut q = 1;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let v = s[[i, j]].abs();
+                if v > max_val {
+                    max_val = v;
+                    p = i;
+                    q = j;
+                }
+            }
+        }
+
+        if max_val < tol {
+            break;
+        }
+
+        // Jacobi rotation angle
+        let diff = s[[q, q]] - s[[p, p]];
+        let t = if diff.abs() < 1e-15 {
+            1.0f64
+        } else {
+            let tau = diff / (2.0 * s[[p, q]]);
+            let sign = if tau >= 0.0 { 1.0 } else { -1.0 };
+            sign / (tau.abs() + (1.0 + tau * tau).sqrt())
+        };
+
+        let c = 1.0 / (1.0 + t * t).sqrt();
+        let sv = t * c;
+
+        // Apply rotation to rows/columns p, q
+        let s_pp = s[[p, p]];
+        let s_qq = s[[q, q]];
+        let s_pq = s[[p, q]];
+
+        s[[p, p]] = c * c * s_pp - 2.0 * sv * c * s_pq + sv * sv * s_qq;
+        s[[q, q]] = sv * sv * s_pp + 2.0 * sv * c * s_pq + c * c * s_qq;
+        s[[p, q]] = 0.0;
+        s[[q, p]] = 0.0;
+
+        for i in 0..n {
+            if i != p && i != q {
+                let s_ip = s[[i, p]];
+                let s_iq = s[[i, q]];
+                s[[i, p]] = c * s_ip - sv * s_iq;
+                s[[p, i]] = s[[i, p]];
+                s[[i, q]] = sv * s_ip + c * s_iq;
+                s[[q, i]] = s[[i, q]];
+            }
+        }
+    }
+
+    let mut eigenvalues: Vec<f64> = (0..n).map(|i| s[[i, i]]).collect();
+    eigenvalues.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    eigenvalues
 }
 
 // =============================================================================
@@ -565,6 +710,95 @@ mod tests {
                 "reconstruct + anomalous_component should equal original at dim {}", i
             );
         }
+    }
+
+    #[test]
+    fn test_subspace_alignment_same_distribution() {
+        let dim = 256;
+        let mut sub_a = OnlineSubspace::new(dim, 8);
+        let mut sub_b = OnlineSubspace::new(dim, 8);
+        let mut rng = 42u64;
+
+        for _ in 0..200 {
+            let v = low_rank_sample(&mut rng, dim);
+            sub_a.update(&v);
+            sub_b.update(&v);
+        }
+
+        let alignment = sub_a.subspace_alignment(&sub_b, 0);
+        assert!(
+            alignment > 0.9,
+            "Same-distribution subspaces should be well-aligned, got {}",
+            alignment
+        );
+    }
+
+    #[test]
+    fn test_subspace_alignment_orthogonal_distributions() {
+        let dim = 256;
+        let mut sub_a = OnlineSubspace::new(dim, 8);
+        let mut sub_b = OnlineSubspace::new(dim, 8);
+
+        // Distribution A: signal only in even dimensions
+        let mut rng_a = 42u64;
+        for _ in 0..200 {
+            rng_a = rng_a
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let coeff = (rng_a >> 33) as f64 / u32::MAX as f64 * 2.0 - 1.0;
+            let v: Vec<f64> = (0..dim)
+                .map(|i| if i < dim / 2 { coeff * ((i + 1) as f64) } else { 0.0 })
+                .collect();
+            sub_a.update(&v);
+        }
+
+        // Distribution B: signal only in odd dimensions
+        let mut rng_b = 999u64;
+        for _ in 0..200 {
+            rng_b = rng_b
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let coeff = (rng_b >> 33) as f64 / u32::MAX as f64 * 2.0 - 1.0;
+            let v: Vec<f64> = (0..dim)
+                .map(|i| if i >= dim / 2 { coeff * ((i + 1) as f64) } else { 0.0 })
+                .collect();
+            sub_b.update(&v);
+        }
+
+        let alignment = sub_a.subspace_alignment(&sub_b, 0);
+        assert!(
+            alignment < 0.3,
+            "Orthogonal subspaces should have low alignment, got {}",
+            alignment
+        );
+    }
+
+    #[test]
+    fn test_subspace_alignment_empty() {
+        let sub_a = OnlineSubspace::new(64, 4);
+        let sub_b = OnlineSubspace::new(64, 4);
+        assert_eq!(sub_a.subspace_alignment(&sub_b, 0), 0.0);
+    }
+
+    #[test]
+    fn test_subspace_alignment_with_explicit_top_angles() {
+        let dim = 128;
+        let mut sub_a = OnlineSubspace::new(dim, 8);
+        let mut sub_b = OnlineSubspace::new(dim, 8);
+        let mut rng = 42u64;
+
+        for _ in 0..200 {
+            let v = low_rank_sample(&mut rng, dim);
+            sub_a.update(&v);
+            sub_b.update(&v);
+        }
+
+        let align_default = sub_a.subspace_alignment(&sub_b, 0);
+        let align_top1 = sub_a.subspace_alignment(&sub_b, 1);
+
+        // Both should be high for same-distribution
+        assert!(align_default > 0.8, "default alignment: {}", align_default);
+        assert!(align_top1 > 0.8, "top-1 alignment: {}", align_top1);
     }
 
     #[test]
