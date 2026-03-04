@@ -65,6 +65,37 @@ impl Encoder {
         Ok(self.encode_value(&value, None))
     }
 
+    /// Encode a JSON string into N striped vectors via FQDN leaf hashing.
+    pub fn encode_json_striped(&self, json: &str, n_stripes: usize) -> Result<Vec<Vector>> {
+        let value: Value = serde_json::from_str(json)?;
+        Ok(self.encode_value_striped(&value, n_stripes))
+    }
+
+    /// Encode a serde_json Value into N striped vectors.
+    pub fn encode_value_striped(&self, value: &Value, n_stripes: usize) -> Vec<Vector> {
+        let walkable_val = json_to_walkable(value);
+        match walkable_val {
+            WalkableValue::Map(items) => {
+                let mut stripes: Vec<Vec<Vector>> = vec![vec![]; n_stripes];
+                for (key, val) in &items {
+                    self.collect_leaf_bindings(val, key, n_stripes, &mut stripes);
+                }
+                stripes
+                    .into_iter()
+                    .map(|bindings| {
+                        if bindings.is_empty() {
+                            Vector::zeros(self.dimensions())
+                        } else {
+                            let refs: Vec<&Vector> = bindings.iter().collect();
+                            Primitives::bundle(&refs)
+                        }
+                    })
+                    .collect()
+            }
+            _ => vec![Vector::zeros(self.dimensions()); n_stripes],
+        }
+    }
+
     /// Encode a serde_json Value into a vector.
     pub fn encode_value(&self, value: &Value, prefix: Option<&str>) -> Vector {
         match value {
@@ -601,6 +632,146 @@ impl Encoder {
         Primitives::bundle(&refs)
     }
 
+    // =========================================================================
+    // Striped Encoding (FQDN leaf hashing)
+    // =========================================================================
+
+    /// Deterministic stripe assignment via FNV-1a hash of the full path.
+    ///
+    /// The same path always maps to the same stripe index, at both encode
+    /// time and drilldown time.
+    pub fn field_stripe(path: &str, n_stripes: usize) -> usize {
+        let mut h = 0xcbf29ce484222325u64;
+        for b in path.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        (h as usize) % n_stripes
+    }
+
+    /// Encode a Walkable into N striped vectors using flat FQDN leaf hashing.
+    ///
+    /// Instead of the hierarchical encoding produced by [`encode_walkable`],
+    /// this method walks the structure recursively, collects every **leaf**
+    /// binding (Scalar or Set), hashes its full dotted path to pick a stripe,
+    /// and bundles each stripe's bindings independently.
+    ///
+    /// Maps and Lists are intermediate nodes that extend the path; they do
+    /// not produce bindings themselves.
+    ///
+    /// The result is N vectors, each containing ~total_leaves/N bindings,
+    /// uniformly distributed regardless of nesting structure.
+    pub fn encode_walkable_striped<W: Walkable>(
+        &self,
+        walkable: &W,
+        n_stripes: usize,
+    ) -> Vec<Vector> {
+        let items = walkable.walk_map_items();
+        let mut stripes: Vec<Vec<Vector>> = vec![vec![]; n_stripes];
+
+        for (key, value) in &items {
+            let path = key.to_string();
+            self.collect_leaf_bindings(value, &path, n_stripes, &mut stripes);
+        }
+
+        stripes
+            .into_iter()
+            .map(|bindings| {
+                if bindings.is_empty() {
+                    Vector::zeros(self.dimensions())
+                } else {
+                    let refs: Vec<&Vector> = bindings.iter().collect();
+                    Primitives::bundle(&refs)
+                }
+            })
+            .collect()
+    }
+
+    /// Recursive flat walk: collect leaf bindings and distribute to stripes.
+    fn collect_leaf_bindings(
+        &self,
+        value: &WalkableValue,
+        path: &str,
+        n_stripes: usize,
+        stripes: &mut [Vec<Vector>],
+    ) {
+        match value {
+            WalkableValue::Scalar(s) => {
+                let idx = Self::field_stripe(path, n_stripes);
+                let role = self.encode_atom(path);
+                let filler = self.encode_scalar_value(s, Some(path));
+                stripes[idx].push(Primitives::bind(&role, &filler));
+            }
+            WalkableValue::Map(items) => {
+                if items.is_empty() {
+                    let idx = Self::field_stripe(path, n_stripes);
+                    let role = self.encode_atom(path);
+                    let filler = self.encode_atom(&Self::make_path(Some(path), "{}"));
+                    stripes[idx].push(Primitives::bind(&role, &filler));
+                    return;
+                }
+                for (key, val) in items {
+                    let sub = Self::make_path(Some(path), key);
+                    self.collect_leaf_bindings(val, &sub, n_stripes, stripes);
+                }
+            }
+            WalkableValue::List(items) => {
+                if items.is_empty() {
+                    let idx = Self::field_stripe(path, n_stripes);
+                    let role = self.encode_atom(path);
+                    let filler = self.encode_atom(&Self::make_path(Some(path), "[]"));
+                    stripes[idx].push(Primitives::bind(&role, &filler));
+                    return;
+                }
+                for (i, item) in items.iter().enumerate() {
+                    let sub = Self::make_path(Some(path), &format!("[{}]", i));
+                    self.collect_leaf_bindings(item, &sub, n_stripes, stripes);
+                }
+            }
+            WalkableValue::Set(items) => {
+                let idx = Self::field_stripe(path, n_stripes);
+                let role = self.encode_atom(path);
+                let filler = self.encode_walkable_value_recursive(
+                    &WalkableValue::Set(items.clone()),
+                    Some(path),
+                );
+                stripes[idx].push(Primitives::bind(&role, &filler));
+            }
+        }
+    }
+
+    /// Produce the bound vector (role ⊙ filler) for a single leaf value at the
+    /// given FQDN path.  This is the exact binding that `encode_walkable_striped`
+    /// places into a stripe — useful for cosine-based drilldown attribution.
+    pub fn leaf_binding(&self, value: &WalkableValue, path: &str) -> Vector {
+        match value {
+            WalkableValue::Scalar(s) => {
+                let role = self.encode_atom(path);
+                let filler = self.encode_scalar_value(s, Some(path));
+                Primitives::bind(&role, &filler)
+            }
+            WalkableValue::Set(items) => {
+                let role = self.encode_atom(path);
+                let filler = self.encode_walkable_value_recursive(
+                    &WalkableValue::Set(items.clone()),
+                    Some(path),
+                );
+                Primitives::bind(&role, &filler)
+            }
+            WalkableValue::Map(items) if items.is_empty() => {
+                let role = self.encode_atom(path);
+                let filler = self.encode_atom(&Self::make_path(Some(path), "{}"));
+                Primitives::bind(&role, &filler)
+            }
+            WalkableValue::List(items) if items.is_empty() => {
+                let role = self.encode_atom(path);
+                let filler = self.encode_atom(&Self::make_path(Some(path), "[]"));
+                Primitives::bind(&role, &filler)
+            }
+            _ => Vector::zeros(self.dimensions()),
+        }
+    }
+
     /// Encode a sequence of items with different modes.
     pub fn encode_sequence(&self, items: &[&str], mode: SequenceMode) -> Vector {
         if items.is_empty() {
@@ -658,6 +829,26 @@ impl Encoder {
                 let refs: Vec<&Vector> = ngram_vecs.iter().collect();
                 Primitives::bundle(&refs)
             }
+        }
+    }
+}
+
+/// Convert a serde_json Value into a WalkableValue for striped encoding.
+fn json_to_walkable(value: &Value) -> WalkableValue {
+    match value {
+        Value::Null => WalkableValue::Scalar(ScalarValue::String("null".into())),
+        Value::Bool(b) => WalkableValue::Scalar(ScalarValue::String(b.to_string())),
+        Value::Number(n) => WalkableValue::Scalar(ScalarValue::String(n.to_string())),
+        Value::String(s) => WalkableValue::Scalar(ScalarValue::String(s.clone())),
+        Value::Array(arr) => {
+            WalkableValue::List(arr.iter().map(json_to_walkable).collect())
+        }
+        Value::Object(obj) => {
+            WalkableValue::Map(
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), json_to_walkable(v)))
+                    .collect(),
+            )
         }
     }
 }
@@ -1233,26 +1424,106 @@ mod tests {
 
     #[test]
     fn test_time_midnight_epoch_vs_midnight_year2() {
-        // Midnight on Jan 1 1970 (epoch) vs Jan 1 1971 (year 2):
-        // Both are midnight, both are Thursday, roughly same month position.
-        // Circular components should be quite similar.
         use crate::walkable::ScalarValue;
         let vm = VectorManager::new(4096);
         let encoder = Encoder::new(vm);
 
-        let epoch = 0.0f64;              // Jan 1 1970 00:00:00 UTC
-        let year2 = 365.0 * 86400.0;    // Jan 1 1971 00:00:00 UTC (approx)
+        let epoch = 0.0f64;
+        let year2 = 365.0 * 86400.0;
 
         let v_epoch = encoder.encode_scalar_value(&ScalarValue::time(epoch), None);
         let v_year2 = encoder.encode_scalar_value(&ScalarValue::time(year2), None);
 
         let sim = Similarity::cosine(&v_epoch, &v_year2);
-        // Same hour (0), same day-of-week (Thursday), same month-fraction (~0).
-        // Should share high circular similarity.
         assert!(
             sim > 0.3,
             "Expected >0.3 for same circular components (midnight Thursday, month 0), got {}",
             sim
+        );
+    }
+
+    // =========================================================================
+    // Striped Encoding Tests
+    // =========================================================================
+
+    #[test]
+    fn test_field_stripe_deterministic() {
+        let s1 = Encoder::field_stripe("method", 8);
+        let s2 = Encoder::field_stripe("method", 8);
+        assert_eq!(s1, s2, "Same path should always map to the same stripe");
+    }
+
+    #[test]
+    fn test_field_stripe_range() {
+        let paths = &[
+            "method", "path", "src_ip", "tls.version",
+            "tls.cipher_order.[5]", "headers.[0].[1]",
+            "tls.extensions.server_name", "cookies.[0].[0]",
+        ];
+        for &path in paths {
+            let idx = Encoder::field_stripe(path, 8);
+            assert!(idx < 8, "Stripe index for '{}' should be < 8, got {}", path, idx);
+        }
+    }
+
+    #[test]
+    fn test_field_stripe_distribution() {
+        let mut counts = vec![0usize; 8];
+        for i in 0..100 {
+            let path = format!("field_{}", i);
+            counts[Encoder::field_stripe(&path, 8)] += 1;
+        }
+        for (i, &c) in counts.iter().enumerate() {
+            assert!(c > 0, "Stripe {} should have at least one field", i);
+        }
+    }
+
+    #[test]
+    fn test_encode_walkable_striped_basic() {
+        let vm = VectorManager::new(256);
+        let encoder = Encoder::new(vm);
+        let stripes = encoder.encode_json_striped(
+            r#"{"method": "GET", "path": "/", "src_ip": "1.2.3.4"}"#,
+            4,
+        ).unwrap();
+
+        assert_eq!(stripes.len(), 4, "Should produce 4 stripe vectors");
+        for (i, v) in stripes.iter().enumerate() {
+            assert_eq!(v.dimensions(), 256, "Stripe {} should have dim 256", i);
+        }
+    }
+
+    #[test]
+    fn test_striped_unbinding_correct_stripe_has_high_signal() {
+        let vm = VectorManager::new(4096);
+        let encoder = Encoder::new(vm);
+
+        let stripes = encoder.encode_json_striped(
+            r#"{"method": "GET", "path": "/api/test", "src_ip": "10.0.0.1"}"#,
+            8,
+        ).unwrap();
+
+        let target_path = "method";
+        let correct_stripe = Encoder::field_stripe(target_path, 8);
+        let role = encoder.get_vector(target_path);
+
+        let correct_unbound = Primitives::bind(&stripes[correct_stripe], &role);
+        let correct_norm: f64 = correct_unbound.data().iter()
+            .map(|&x| (x as f64).powi(2)).sum::<f64>().sqrt();
+
+        let mut max_wrong_norm = 0.0f64;
+        for (i, stripe) in stripes.iter().enumerate() {
+            if i == correct_stripe { continue; }
+            let wrong_unbound = Primitives::bind(stripe, &role);
+            let wrong_norm: f64 = wrong_unbound.data().iter()
+                .map(|&x| (x as f64).powi(2)).sum::<f64>().sqrt();
+            max_wrong_norm = max_wrong_norm.max(wrong_norm);
+        }
+
+        assert!(
+            correct_norm > max_wrong_norm,
+            "Unbinding from correct stripe ({:.2}) should be higher than wrong stripes ({:.2})",
+            correct_norm, max_wrong_norm,
         );
     }
 }

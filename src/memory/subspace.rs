@@ -473,6 +473,150 @@ impl OnlineSubspace {
     }
 }
 
+// =============================================================================
+// StripedSubspace — N independent subspaces for crosstalk-free attribution
+// =============================================================================
+
+/// Serializable snapshot of a StripedSubspace.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StripedSubspaceSnapshot {
+    pub stripes: Vec<SubspaceSnapshot>,
+}
+
+/// N independent OnlineSubspaces, one per stripe.
+///
+/// Each stripe learns and scores its own portion of the encoded data.
+/// Aggregate residual is the root-sum-of-squares (RSS) of per-stripe
+/// residuals, preserving the geometric interpretation of anomaly magnitude.
+///
+/// Used with [`Encoder::encode_walkable_striped`] which distributes leaf
+/// bindings across stripes via FQDN path hashing.
+///
+/// [`Encoder::encode_walkable_striped`]: crate::kernel::Encoder::encode_walkable_striped
+#[derive(Clone, Debug)]
+pub struct StripedSubspace {
+    stripes: Vec<OnlineSubspace>,
+}
+
+impl StripedSubspace {
+    /// Create N independent subspaces, each with the given dimensionality and components.
+    pub fn new(dim: usize, k: usize, n_stripes: usize) -> Self {
+        Self {
+            stripes: (0..n_stripes)
+                .map(|_| OnlineSubspace::new(dim, k))
+                .collect(),
+        }
+    }
+
+    /// Create with explicit subspace parameters.
+    pub fn with_params(
+        dim: usize,
+        k: usize,
+        n_stripes: usize,
+        amnesia: f64,
+        ema_alpha: f64,
+        sigma_mult: f64,
+        reorth_interval: usize,
+    ) -> Self {
+        Self {
+            stripes: (0..n_stripes)
+                .map(|_| OnlineSubspace::with_params(dim, k, amnesia, ema_alpha, sigma_mult, reorth_interval))
+                .collect(),
+        }
+    }
+
+    pub fn n_stripes(&self) -> usize {
+        self.stripes.len()
+    }
+
+    pub fn dim(&self) -> usize {
+        self.stripes.first().map_or(0, |s| s.dim())
+    }
+
+    pub fn k(&self) -> usize {
+        self.stripes.first().map_or(0, |s| s.k())
+    }
+
+    /// Total observations fed to the stripes (uses stripe 0 as reference).
+    pub fn n(&self) -> usize {
+        self.stripes.first().map_or(0, |s| s.n())
+    }
+
+    /// Update all stripes with their corresponding vectors.
+    ///
+    /// Returns the RSS aggregate residual.
+    ///
+    /// # Panics
+    /// Panics if `stripe_vecs.len() != n_stripes` or any vec has wrong dim.
+    pub fn update(&mut self, stripe_vecs: &[Vec<f64>]) -> f64 {
+        assert_eq!(stripe_vecs.len(), self.stripes.len());
+        let mut sum_sq = 0.0;
+        for (sub, vec) in self.stripes.iter_mut().zip(stripe_vecs.iter()) {
+            let r = sub.update(vec);
+            sum_sq += r * r;
+        }
+        sum_sq.sqrt()
+    }
+
+    /// RSS aggregate residual across all stripes.
+    pub fn residual(&self, stripe_vecs: &[Vec<f64>]) -> f64 {
+        assert_eq!(stripe_vecs.len(), self.stripes.len());
+        let mut sum_sq = 0.0;
+        for (sub, vec) in self.stripes.iter().zip(stripe_vecs.iter()) {
+            let r = sub.residual(vec);
+            sum_sq += r * r;
+        }
+        sum_sq.sqrt()
+    }
+
+    /// RSS aggregate threshold across all stripes.
+    pub fn threshold(&self) -> f64 {
+        let mut sum_sq = 0.0;
+        for sub in &self.stripes {
+            let t = sub.threshold();
+            if t.is_infinite() {
+                return f64::INFINITY;
+            }
+            sum_sq += t * t;
+        }
+        sum_sq.sqrt()
+    }
+
+    /// Anomalous component for a single stripe (for drilldown).
+    pub fn anomalous_component(&self, stripe_vecs: &[Vec<f64>], stripe_idx: usize) -> Vec<f64> {
+        self.stripes[stripe_idx].anomalous_component(&stripe_vecs[stripe_idx])
+    }
+
+    /// Per-stripe residual (for diagnostics).
+    pub fn stripe_residual(&self, stripe_vecs: &[Vec<f64>], stripe_idx: usize) -> f64 {
+        self.stripes[stripe_idx].residual(&stripe_vecs[stripe_idx])
+    }
+
+    /// Per-stripe threshold (for diagnostics).
+    pub fn stripe_threshold(&self, stripe_idx: usize) -> f64 {
+        self.stripes[stripe_idx].threshold()
+    }
+
+    /// Access an individual stripe subspace.
+    pub fn stripe(&self, idx: usize) -> &OnlineSubspace {
+        &self.stripes[idx]
+    }
+
+    /// Export state for persistence.
+    pub fn snapshot(&self) -> StripedSubspaceSnapshot {
+        StripedSubspaceSnapshot {
+            stripes: self.stripes.iter().map(|s| s.snapshot()).collect(),
+        }
+    }
+
+    /// Restore from a snapshot.
+    pub fn from_snapshot(snap: StripedSubspaceSnapshot) -> Self {
+        Self {
+            stripes: snap.stripes.into_iter().map(OnlineSubspace::from_snapshot).collect(),
+        }
+    }
+}
+
 #[inline]
 fn norm(v: &[f64]) -> f64 {
     v.iter().map(|x| x * x).sum::<f64>().sqrt()
@@ -819,5 +963,143 @@ mod tests {
             "Expected explained_ratio > 0.5 after training, got {}",
             sub.explained_ratio()
         );
+    }
+
+    // =========================================================================
+    // StripedSubspace Tests
+    // =========================================================================
+
+    #[test]
+    fn test_striped_threshold_infinite_before_training() {
+        let striped = StripedSubspace::new(64, 4, 8);
+        assert_eq!(striped.threshold(), f64::INFINITY);
+        assert_eq!(striped.n_stripes(), 8);
+    }
+
+    #[test]
+    fn test_striped_update_returns_rss_residual() {
+        let dim = 128;
+        let n = 4;
+        let mut striped = StripedSubspace::new(dim, 8, n);
+        let mut rng = 42u64;
+
+        for _ in 0..100 {
+            let vecs: Vec<Vec<f64>> = (0..n)
+                .map(|_| low_rank_sample(&mut rng, dim))
+                .collect();
+            let res = striped.update(&vecs);
+            assert!(res >= 0.0, "RSS residual should be non-negative");
+        }
+        assert!(striped.threshold().is_finite());
+    }
+
+    #[test]
+    fn test_striped_in_distribution_below_threshold() {
+        let dim = 256;
+        let n = 4;
+        let mut striped = StripedSubspace::with_params(dim, 8, n, 2.0, 0.01, 2.5, 500);
+        let mut rng = 42u64;
+
+        for _ in 0..200 {
+            let vecs: Vec<Vec<f64>> = (0..n)
+                .map(|_| low_rank_sample(&mut rng, dim))
+                .collect();
+            striped.update(&vecs);
+        }
+
+        let mut above = 0;
+        for _ in 0..20 {
+            let vecs: Vec<Vec<f64>> = (0..n)
+                .map(|_| low_rank_sample(&mut rng, dim))
+                .collect();
+            if striped.residual(&vecs) > striped.threshold() {
+                above += 1;
+            }
+        }
+        assert!(above <= 5, "Expected at most 5/20 in-dist above threshold, got {}", above);
+    }
+
+    #[test]
+    fn test_striped_ood_above_threshold() {
+        let dim = 256;
+        let n = 4;
+        let mut striped = StripedSubspace::with_params(dim, 8, n, 2.0, 0.01, 2.5, 500);
+        let mut rng = 42u64;
+
+        for _ in 0..300 {
+            let vecs: Vec<Vec<f64>> = (0..n)
+                .map(|_| low_rank_sample(&mut rng, dim))
+                .collect();
+            striped.update(&vecs);
+        }
+
+        let mut above = 0;
+        let mut rng2 = 999u64;
+        for _ in 0..10 {
+            let vecs: Vec<Vec<f64>> = (0..n)
+                .map(|_| random_sample(&mut rng2, dim))
+                .collect();
+            if striped.residual(&vecs) > striped.threshold() {
+                above += 1;
+            }
+        }
+        assert!(above >= 7, "Expected most OOD samples above threshold, got {}/10", above);
+    }
+
+    #[test]
+    fn test_striped_snapshot_round_trip() {
+        let dim = 128;
+        let n = 4;
+        let mut striped = StripedSubspace::new(dim, 8, n);
+        let mut rng = 42u64;
+
+        for _ in 0..100 {
+            let vecs: Vec<Vec<f64>> = (0..n)
+                .map(|_| low_rank_sample(&mut rng, dim))
+                .collect();
+            striped.update(&vecs);
+        }
+
+        let snap = striped.snapshot();
+        let restored = StripedSubspace::from_snapshot(snap);
+
+        let mut rng2 = 1234u64;
+        for _ in 0..10 {
+            let vecs: Vec<Vec<f64>> = (0..n)
+                .map(|_| low_rank_sample(&mut rng2, dim))
+                .collect();
+            let r1 = striped.residual(&vecs);
+            let r2 = restored.residual(&vecs);
+            assert!(
+                (r1 - r2).abs() < 1e-10,
+                "Striped residuals differ after round-trip: {} vs {}", r1, r2
+            );
+        }
+    }
+
+    #[test]
+    fn test_striped_anomalous_component() {
+        let dim = 128;
+        let n = 4;
+        let mut striped = StripedSubspace::new(dim, 8, n);
+        let mut rng = 42u64;
+
+        for _ in 0..200 {
+            let vecs: Vec<Vec<f64>> = (0..n)
+                .map(|_| low_rank_sample(&mut rng, dim))
+                .collect();
+            striped.update(&vecs);
+        }
+
+        let probe: Vec<Vec<f64>> = (0..n)
+            .map(|_| random_sample(&mut rng, dim))
+            .collect();
+
+        for stripe_idx in 0..n {
+            let anom = striped.anomalous_component(&probe, stripe_idx);
+            assert_eq!(anom.len(), dim);
+            let norm: f64 = anom.iter().map(|x| x * x).sum::<f64>().sqrt();
+            assert!(norm > 0.0, "Anomalous component should be non-zero for OOD");
+        }
     }
 }

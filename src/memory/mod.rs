@@ -43,4 +43,4 @@ pub mod engram;
 pub mod subspace;
 
 pub use engram::{Engram, EngramLibrary};
-pub use subspace::OnlineSubspace;
+pub use subspace::{OnlineSubspace, StripedSubspace, StripedSubspaceSnapshot};
