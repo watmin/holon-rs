@@ -42,10 +42,15 @@ pub enum WalkType {
     Scalar,
     /// Key-value pairs (like HashMap, structs)
     Map,
-    /// Ordered sequences (like Vec, arrays)
+    /// Ordered sequences (like Vec, arrays).
+    /// Composed: positionally encoded items bundled into one vector.
     List,
     /// Unordered unique items (like HashSet)
     Set,
+    /// Independent items sharing a namespace.
+    /// Each element gets its own indexed path and leaf binding (fan-out).
+    /// Use when per-element attribution matters.
+    Spread,
 }
 
 /// Resolution for temporal encoding — controls the positional component granularity.
@@ -360,16 +365,25 @@ impl<'a> WalkableRef<'a> {
 ///
 /// This enum allows returning owned values from `walk_*` methods,
 /// making it easier to implement Walkable for custom types.
+///
+/// `List` and `Set` are **composed**: items are encoded and bundled into a
+/// single vector.  `Spread` is **fanned out**: each element becomes an
+/// independent leaf binding with its own indexed path (e.g., `field.[0]`,
+/// `field.[1]`).  The Walkable implementation chooses which semantics to use
+/// per field.
 #[derive(Clone, Debug)]
 pub enum WalkableValue {
     /// A scalar value
     Scalar(ScalarValue),
     /// A map of key-value pairs
     Map(Vec<(String, WalkableValue)>),
-    /// An ordered list of items
+    /// An ordered list of items — composed into one vector
     List(Vec<WalkableValue>),
-    /// An unordered set of items
+    /// An unordered set of items — composed into one vector
     Set(Vec<WalkableValue>),
+    /// Independent indexed items — each element fans out into its own leaf binding.
+    /// Use when per-element attribution or rule crafting is needed.
+    Spread(Vec<WalkableValue>),
 }
 
 impl WalkableValue {
@@ -380,6 +394,7 @@ impl WalkableValue {
             WalkableValue::Map(_) => WalkType::Map,
             WalkableValue::List(_) => WalkType::List,
             WalkableValue::Set(_) => WalkType::Set,
+            WalkableValue::Spread(_) => WalkType::Spread,
         }
     }
 }
@@ -432,6 +447,15 @@ pub trait Walkable {
         )
     }
 
+    /// Return items for fan-out. Only valid for `WalkType::Spread`.
+    /// Each item becomes an independent leaf binding with its own indexed path.
+    fn walk_spread_items(&self) -> Vec<WalkableValue> {
+        panic!(
+            "walk_spread_items() called on {:?} (not a Spread)",
+            self.walk_type()
+        )
+    }
+
     /// Convert to a WalkableValue (for nested structures).
     fn to_walkable_value(&self) -> WalkableValue {
         match self.walk_type() {
@@ -446,6 +470,7 @@ pub trait Walkable {
             }
             WalkType::List => WalkableValue::List(self.walk_list_items()),
             WalkType::Set => WalkableValue::Set(self.walk_set_items()),
+            WalkType::Spread => WalkableValue::Spread(self.walk_spread_items()),
         }
     }
 
@@ -773,6 +798,7 @@ impl Walkable for WalkableValue {
             WalkableValue::Map(_) => WalkType::Map,
             WalkableValue::List(_) => WalkType::List,
             WalkableValue::Set(_) => WalkType::Set,
+            WalkableValue::Spread(_) => WalkType::Spread,
         }
     }
 
@@ -801,6 +827,13 @@ impl Walkable for WalkableValue {
         match self {
             WalkableValue::Set(items) => items.clone(),
             _ => panic!("walk_set_items() called on non-set WalkableValue"),
+        }
+    }
+
+    fn walk_spread_items(&self) -> Vec<WalkableValue> {
+        match self {
+            WalkableValue::Spread(items) => items.clone(),
+            _ => panic!("walk_spread_items() called on non-spread WalkableValue"),
         }
     }
 

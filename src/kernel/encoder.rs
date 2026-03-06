@@ -156,6 +156,7 @@ impl Encoder {
             WalkType::Map => self.encode_walkable_map(walkable, prefix),
             WalkType::List => self.encode_walkable_list(walkable, prefix),
             WalkType::Set => self.encode_walkable_set(walkable, prefix),
+            WalkType::Spread => self.encode_walkable_list(walkable, prefix),
         }
     }
 
@@ -214,6 +215,24 @@ impl Encoder {
                 let refs: Vec<&Vector> = vectors.iter().collect();
                 let bundled = Primitives::bundle(&refs);
                 Primitives::bind(&set_indicator, &bundled)
+            }
+            WalkableValue::Spread(items) => {
+                if items.is_empty() {
+                    return self.encode_atom(&Self::make_path(prefix, "[]"));
+                }
+
+                let mut vectors: Vec<Vector> = Vec::new();
+
+                for (i, item) in items.iter().enumerate() {
+                    let pos_prefix = Self::make_path(prefix, &format!("[{}]", i));
+                    let item_vec = self.encode_walkable_value_recursive(item, Some(&pos_prefix));
+                    let pos_vec = self.encode_atom(&pos_prefix);
+                    let bound = Primitives::bind(&pos_vec, &item_vec);
+                    vectors.push(bound);
+                }
+
+                let refs: Vec<&Vector> = vectors.iter().collect();
+                Primitives::bundle(&refs)
             }
         }
     }
@@ -688,6 +707,12 @@ impl Encoder {
     }
 
     /// Recursive flat walk: collect leaf bindings and distribute to stripes.
+    ///
+    /// `Scalar` and `Set` produce a single leaf binding.
+    /// `List` composes into a single leaf binding (positionally encoded bundle).
+    /// `Map` recurses by key.
+    /// `Spread` fans out — each element becomes an independent leaf binding
+    /// with its own indexed path.
     fn collect_leaf_bindings(
         &self,
         value: &WalkableValue,
@@ -716,6 +741,24 @@ impl Encoder {
                 }
             }
             WalkableValue::List(items) => {
+                let idx = Self::field_stripe(path, n_stripes);
+                let role = self.encode_atom(path);
+                let filler = self.encode_walkable_value_recursive(
+                    &WalkableValue::List(items.clone()),
+                    Some(path),
+                );
+                stripes[idx].push(Primitives::bind(&role, &filler));
+            }
+            WalkableValue::Set(items) => {
+                let idx = Self::field_stripe(path, n_stripes);
+                let role = self.encode_atom(path);
+                let filler = self.encode_walkable_value_recursive(
+                    &WalkableValue::Set(items.clone()),
+                    Some(path),
+                );
+                stripes[idx].push(Primitives::bind(&role, &filler));
+            }
+            WalkableValue::Spread(items) => {
                 if items.is_empty() {
                     let idx = Self::field_stripe(path, n_stripes);
                     let role = self.encode_atom(path);
@@ -727,15 +770,6 @@ impl Encoder {
                     let sub = Self::make_path(Some(path), &format!("[{}]", i));
                     self.collect_leaf_bindings(item, &sub, n_stripes, stripes);
                 }
-            }
-            WalkableValue::Set(items) => {
-                let idx = Self::field_stripe(path, n_stripes);
-                let role = self.encode_atom(path);
-                let filler = self.encode_walkable_value_recursive(
-                    &WalkableValue::Set(items.clone()),
-                    Some(path),
-                );
-                stripes[idx].push(Primitives::bind(&role, &filler));
             }
         }
     }
@@ -758,12 +792,20 @@ impl Encoder {
                 );
                 Primitives::bind(&role, &filler)
             }
+            WalkableValue::List(items) => {
+                let role = self.encode_atom(path);
+                let filler = self.encode_walkable_value_recursive(
+                    &WalkableValue::List(items.clone()),
+                    Some(path),
+                );
+                Primitives::bind(&role, &filler)
+            }
             WalkableValue::Map(items) if items.is_empty() => {
                 let role = self.encode_atom(path);
                 let filler = self.encode_atom(&Self::make_path(Some(path), "{}"));
                 Primitives::bind(&role, &filler)
             }
-            WalkableValue::List(items) if items.is_empty() => {
+            WalkableValue::Spread(items) if items.is_empty() => {
                 let role = self.encode_atom(path);
                 let filler = self.encode_atom(&Self::make_path(Some(path), "[]"));
                 Primitives::bind(&role, &filler)
