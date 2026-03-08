@@ -558,15 +558,20 @@ impl StripedSubspace {
         sum_sq.sqrt()
     }
 
+    /// Per-stripe residual profile: the N-dim vector of individual stripe
+    /// residuals.  This is the directional signal — the *pattern* of which
+    /// stripes are anomalous — complementing the scalar magnitude (RSS).
+    pub fn residual_profile(&self, stripe_vecs: &[Vec<f64>]) -> Vec<f64> {
+        assert_eq!(stripe_vecs.len(), self.stripes.len());
+        self.stripes.iter().zip(stripe_vecs.iter())
+            .map(|(sub, vec)| sub.residual(vec))
+            .collect()
+    }
+
     /// RSS aggregate residual across all stripes.
     pub fn residual(&self, stripe_vecs: &[Vec<f64>]) -> f64 {
-        assert_eq!(stripe_vecs.len(), self.stripes.len());
-        let mut sum_sq = 0.0;
-        for (sub, vec) in self.stripes.iter().zip(stripe_vecs.iter()) {
-            let r = sub.residual(vec);
-            sum_sq += r * r;
-        }
-        sum_sq.sqrt()
+        let profile = self.residual_profile(stripe_vecs);
+        profile.iter().map(|r| r * r).sum::<f64>().sqrt()
     }
 
     /// RSS aggregate threshold across all stripes.
