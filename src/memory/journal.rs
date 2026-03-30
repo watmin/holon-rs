@@ -108,6 +108,20 @@ pub struct Journal {
     /// Mean prototype across all classes (for input stripping).
     mean_proto: Option<Vec<f64>>,
 
+    // ── Curve (self-evaluation) ────────────────────────────────────
+    /// Resolved predictions: (conviction, correct). The raw data for curve fitting.
+    resolved: Vec<(f64, bool)>,
+    /// Maximum resolved predictions to retain. Configurable.
+    resolved_cap: usize,
+    /// Minimum resolved predictions before curve fitting is attempted.
+    min_resolved: usize,
+    /// Number of bins for curve fitting.
+    n_bins: usize,
+    /// Cached curve parameters from last fit.
+    curve_a: f64,
+    curve_b: f64,
+    curve_valid: bool,
+
     // ── Diagnostics ─────────────────────────────────────────────────
     recalib_count: usize,
     last_cos_raw: f64,
@@ -126,10 +140,25 @@ impl Journal {
             recalib_interval,
             discriminants: Vec::new(),
             mean_proto: None,
+            resolved: Vec::new(),
+            resolved_cap: 5000,
+            min_resolved: 500,
+            n_bins: 20,
+            curve_a: 0.0,
+            curve_b: 0.0,
+            curve_valid: false,
             recalib_count: 0,
             last_cos_raw: 0.0,
             last_disc_strength: 0.0,
         }
+    }
+
+    /// Configure curve fitting parameters. Chainable.
+    pub fn with_curve_params(mut self, resolved_cap: usize, min_resolved: usize, n_bins: usize) -> Self {
+        self.resolved_cap = resolved_cap;
+        self.min_resolved = min_resolved;
+        self.n_bins = n_bins;
+        self
     }
 
     /// Register a label and get its symbol handle.
@@ -201,6 +230,94 @@ impl Journal {
             acc.decay(factor);
         }
     }
+
+    // ── Curve (self-evaluation) ────────────────────────────────────
+
+    /// Record a resolved prediction: "I predicted with this conviction, and I was correct/wrong."
+    /// The journal accumulates these to fit its conviction-accuracy curve.
+    pub fn resolve(&mut self, conviction: f64, correct: bool) {
+        self.resolved.push((conviction, correct));
+        if self.resolved.len() > self.resolved_cap {
+            self.resolved.remove(0);
+        }
+    }
+
+    /// Fit the conviction-accuracy curve from resolved predictions.
+    /// accuracy = base + a × exp(b × conviction)
+    /// where base = 1/N (random chance for N labels).
+    /// Returns (a, b) or None if insufficient data.
+    pub fn curve(&mut self) -> Option<(f64, f64)> {
+        let n_labels = self.label_names.len();
+        if n_labels < 2 { return None; }
+        if self.resolved.len() < self.min_resolved { return None; }
+
+        let base = 1.0 / n_labels as f64;  // random chance: 0.50 for binary, 0.33 for ternary, etc.
+        let base_epsilon = base + 0.005;     // just above random chance
+
+        // Bin resolved predictions by conviction
+        let mut sorted: Vec<(f64, bool)> = self.resolved.clone();
+        sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let bin_size = sorted.len() / self.n_bins;
+        if bin_size < 10 { return None; }
+
+        // Log-linear regression: ln(acc - base) = ln(a) + b × conviction
+        let mut points: Vec<(f64, f64)> = Vec::new();
+        for bi in 0..self.n_bins {
+            let start = bi * bin_size;
+            let end = if bi == self.n_bins - 1 { sorted.len() } else { (bi + 1) * bin_size };
+            let slice = &sorted[start..end];
+            let mean_c = slice.iter().map(|(c, _)| c).sum::<f64>() / slice.len() as f64;
+            let acc = slice.iter().filter(|(_, w)| *w).count() as f64 / slice.len() as f64;
+            if acc > base_epsilon {
+                let ln_excess = (acc - base).ln();
+                if ln_excess.is_finite() {
+                    points.push((mean_c, ln_excess));
+                }
+            }
+        }
+
+        if points.len() < 3 { return None; }
+
+        let n = points.len() as f64;
+        let sx: f64 = points.iter().map(|(x, _)| x).sum();
+        let sy: f64 = points.iter().map(|(_, y)| y).sum();
+        let sxx: f64 = points.iter().map(|(x, _)| x * x).sum();
+        let sxy: f64 = points.iter().map(|(x, y)| x * y).sum();
+        let denom = n * sxx - sx * sx;
+        if denom.abs() < 1e-10 { return None; }
+
+        let b = (n * sxy - sx * sy) / denom;
+        let ln_a = (sy - b * sx) / n;
+        let a = ln_a.exp();
+
+        self.curve_a = a;
+        self.curve_b = b;
+        self.curve_valid = true;
+
+        Some((a, b))
+    }
+
+    /// Evaluate accuracy at a given conviction level using the fitted curve.
+    /// accuracy = base + a × exp(b × conviction), where base = 1/N.
+    /// Returns None if curve has not been fitted yet.
+    pub fn accuracy_at(&self, conviction: f64) -> Option<f64> {
+        if !self.curve_valid { return None; }
+        let n_labels = self.label_names.len();
+        if n_labels < 2 { return None; }
+        let base = 1.0 / n_labels as f64;
+        Some((base + self.curve_a * (self.curve_b * conviction).exp()).min(0.99))
+    }
+
+    /// Whether the curve has been fitted.
+    pub fn curve_valid(&self) -> bool { self.curve_valid }
+
+    /// The cached curve parameters.
+    pub fn curve_params(&self) -> Option<(f64, f64)> {
+        if self.curve_valid { Some((self.curve_a, self.curve_b)) } else { None }
+    }
+
+    /// Number of resolved predictions.
+    pub fn resolved_count(&self) -> usize { self.resolved.len() }
 
     // ── Label resolution ────────────────────────────────────────────
 
@@ -417,5 +534,63 @@ mod tests {
         let v = vm.get_vector("test");
         j.observe(&v, a, 1.0);
         j.decay(0.5);
+    }
+
+    #[test]
+    fn test_curve_insufficient_data() {
+        let mut j = Journal::new("test", 1024, 10);
+        j.register("A");
+        j.register("B");
+
+        // Not enough resolved predictions
+        for i in 0..100 {
+            j.resolve(i as f64 * 0.01, i % 2 == 0);
+        }
+        assert!(j.curve().is_none());
+        assert!(!j.curve_valid());
+        assert!(j.accuracy_at(0.5).is_none());
+    }
+
+    #[test]
+    fn test_curve_with_signal() {
+        let mut j = Journal::new("test", 1024, 10);
+        j.register("A");
+        j.register("B");
+
+        // Simulate: higher conviction → higher accuracy
+        // Low conviction: ~50% correct (noise). High conviction: ~80% correct (signal).
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        for i in 0..2000 {
+            let conviction = (i as f64) / 2000.0;  // 0.0 to 1.0
+            // Probability of correct increases with conviction
+            let mut hasher = DefaultHasher::new();
+            i.hash(&mut hasher);
+            let roll = (hasher.finish() % 1000) as f64 / 1000.0;
+            let threshold = 0.50 - conviction * 0.35;  // high conviction → lower threshold → more correct
+            let correct = roll > threshold;
+            j.resolve(conviction, correct);
+        }
+
+        let result = j.curve();
+        assert!(result.is_some(), "curve should fit with 2000 resolved");
+        assert!(j.curve_valid());
+
+        // Higher conviction should give higher accuracy
+        let low = j.accuracy_at(0.1).unwrap();
+        let high = j.accuracy_at(0.9).unwrap();
+        assert!(high > low, "accuracy should increase with conviction: low={:.3} high={:.3}", low, high);
+    }
+
+    #[test]
+    fn test_resolve_cap() {
+        let mut j = Journal::new("test", 1024, 10);
+        j.register("A");
+        j.register("B");
+
+        for i in 0..10000 {
+            j.resolve(0.5, i % 2 == 0);
+        }
+        assert!(j.resolved_count() <= 5000, "resolved should be capped");
     }
 }
