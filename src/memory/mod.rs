@@ -40,7 +40,9 @@
 //! ```
 
 pub mod engram;
+pub mod journal;
 pub mod subspace;
 
 pub use engram::{Engram, EngramLibrary};
+pub use journal::{Journal, Label, LabelScore, Prediction};
 pub use subspace::{OnlineSubspace, StripedSubspace, StripedSubspaceSnapshot, SubspaceSnapshot};

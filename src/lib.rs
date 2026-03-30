@@ -71,7 +71,7 @@ pub use kernel::{
     ScalarMode, SegmentMethod, SequenceMode, Similarity, Vector, VectorManager,
 };
 pub use kernel::{ScalarRef, ScalarValue, TimeResolution, WalkType, Walkable, WalkableRef, WalkableValue};
-pub use memory::{Engram, EngramLibrary, OnlineSubspace};
+pub use memory::{Engram, EngramLibrary, Journal, Label, LabelScore, OnlineSubspace, Prediction as JournalPrediction};
 
 #[cfg(test)]
 mod tests {
