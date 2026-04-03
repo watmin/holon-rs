@@ -212,7 +212,10 @@ impl Journal {
             scores.push(LabelScore { label: Label(i as u32), cosine: cos });
         }
 
-        scores.sort_by(|a, b| b.cosine.abs().partial_cmp(&a.cosine.abs())
+        // Highest raw cosine wins — the label whose discriminant the input
+        // aligns with most positively. Positive = "looks like this class."
+        // Negative = "does NOT look like this class." Abs sort confuses the two.
+        scores.sort_by(|a, b| b.cosine.partial_cmp(&a.cosine)
             .unwrap_or(std::cmp::Ordering::Equal));
 
         let (direction, conviction, raw_cos) = if let Some(best) = scores.first() {
@@ -346,6 +349,18 @@ impl Journal {
         if label.index() < self.accumulators.len() {
             self.accumulators[label.index()].count()
         } else { 0 }
+    }
+
+    /// Prototype health: (buy_norm, sell_norm, cosine_between_prototypes).
+    /// Returns None if fewer than 2 labels registered.
+    pub fn prototype_health(&self) -> Option<(f64, f64, f64)> {
+        if self.accumulators.len() < 2 { return None; }
+        let a = self.accumulators[0].normalize_f64();
+        let b = self.accumulators[1].normalize_f64();
+        let norm_a = a.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let norm_b = b.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let cos = cosine_f64(&a, &b);
+        Some((norm_a, norm_b, cos))
     }
 
     /// Get the discriminant for a label (for decode/analysis).
