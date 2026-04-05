@@ -277,6 +277,24 @@ impl ScalarEncoder {
         10.0_f64.powf(best_log)
     }
 
+    /// Encode a scalar value as f64 vector (no bipolar thresholding).
+    /// Preserves the continuous rotation. Use for f64-space comparison
+    /// when extracting scalars from accumulated prototypes.
+    pub fn encode_f64(&self, value: f64, mode: ScalarMode) -> Vec<f64> {
+        let (angle, scale) = match mode {
+            ScalarMode::Linear { scale } => (value / scale * std::f64::consts::PI * 2.0, scale),
+            ScalarMode::Circular { period } => {
+                let normalized = (value % period) / period;
+                (normalized * std::f64::consts::PI * 2.0, period)
+            }
+        };
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+        (0..self.dimensions)
+            .map(|i| self.base_vector[i] * cos_a + self.ortho_vector[i] * sin_a)
+            .collect()
+    }
+
     /// Encode with a custom seed (for different "dimensions" of scalars).
     ///
     /// Use this when you need to encode multiple different scalar types
