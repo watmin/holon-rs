@@ -169,6 +169,54 @@ impl Primitives {
         }
     }
 
+    // ── f64 pipeline ──────────────────────────────────────────────────────
+    // For scalar extraction from accumulated prototypes.
+    // The i8 pipeline is for encoding and prediction.
+    // The f64 pipeline is for extraction and analysis.
+
+    /// Bind in f64 space: element-wise multiply. Unbind is the same operation.
+    pub fn bind_f64(a: &[f64], b: &[f64]) -> Vec<f64> {
+        a.iter().zip(b.iter()).map(|(&x, &y)| x * y).collect()
+    }
+
+    /// Negate (orthogonalize) in f64 space: project out the component's direction.
+    /// `result = a - (dot(a,b)/dot(b,b)) * b`
+    pub fn negate_f64(superposition: &[f64], component: &[f64]) -> Vec<f64> {
+        let dot_ab: f64 = superposition.iter().zip(component.iter()).map(|(&a, &b)| a * b).sum();
+        let dot_bb: f64 = component.iter().map(|&b| b * b).sum();
+        let scale = if dot_bb > 1e-10 { dot_ab / dot_bb } else { 0.0 };
+        superposition.iter().zip(component.iter())
+            .map(|(&a, &b)| a - scale * b)
+            .collect()
+    }
+
+    /// Cosine similarity in f64 space.
+    pub fn cosine_f64(a: &[f64], b: &[f64]) -> f64 {
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for (&x, &y) in a.iter().zip(b.iter()) {
+            dot += x * y;
+            na += x * x;
+            nb += y * y;
+        }
+        let denom = (na * nb).sqrt();
+        if denom < 1e-10 { 0.0 } else { dot / denom }
+    }
+
+    /// Bundle in f64 space: element-wise sum (no thresholding).
+    pub fn bundle_f64(vectors: &[&[f64]]) -> Vec<f64> {
+        if vectors.is_empty() { return Vec::new(); }
+        let dims = vectors[0].len();
+        let mut sums = vec![0.0f64; dims];
+        for v in vectors {
+            for (s, &x) in sums.iter_mut().zip(v.iter()) {
+                *s += x;
+            }
+        }
+        sums
+    }
+
     /// Amplify a component's presence in a superposition.
     ///
     /// Strengthens the signal from a specific component.
@@ -1815,5 +1863,51 @@ mod tests {
         let stream: Vec<Vector> = (0..10).map(|i| make_bipolar(64, i)).collect();
         let rates = Primitives::drift_rate(&stream, 1);
         assert_eq!(rates.len(), stream.len() - 2);
+    }
+
+    // ── f64 pipeline tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_bind_f64_self_inverse() {
+        let a = vec![1.0, -1.0, 1.0, -1.0];
+        let b = vec![-1.0, 1.0, 1.0, -1.0];
+        let bound = Primitives::bind_f64(&a, &b);
+        let recovered = Primitives::bind_f64(&bound, &a);
+        for (&r, &orig) in recovered.iter().zip(b.iter()) {
+            assert!((r - orig).abs() < 1e-10, "bind_f64 should be self-inverse");
+        }
+    }
+
+    #[test]
+    fn test_negate_f64_removes_component() {
+        let component = vec![1.0, 0.0, 1.0, 0.0];
+        let superposition = vec![1.0, 1.0, 1.0, 1.0];
+        let negated = Primitives::negate_f64(&superposition, &component);
+        // dot(negated, component) should be ~0 (orthogonal)
+        let dot: f64 = negated.iter().zip(component.iter()).map(|(&a, &b)| a * b).sum();
+        assert!(dot.abs() < 1e-10, "negated should be orthogonal to component: dot={}", dot);
+    }
+
+    #[test]
+    fn test_cosine_f64_self_similarity() {
+        let a = vec![1.0, -1.0, 1.0, -1.0, 1.0];
+        assert!((Primitives::cosine_f64(&a, &a) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cosine_f64_orthogonal() {
+        let a = vec![1.0, 0.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0, 0.0];
+        assert!(Primitives::cosine_f64(&a, &b).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_bundle_f64_sums() {
+        let a = vec![1.0, -1.0, 1.0];
+        let b = vec![1.0, 1.0, -1.0];
+        let c = Primitives::bundle_f64(&[&a, &b]);
+        assert!((c[0] - 2.0).abs() < 1e-10);
+        assert!((c[1] - 0.0).abs() < 1e-10);
+        assert!((c[2] - 0.0).abs() < 1e-10);
     }
 }
