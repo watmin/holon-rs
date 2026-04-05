@@ -370,14 +370,24 @@ impl Journal {
             .and_then(|d| d.as_deref())
     }
 
-    /// Get the raw prototype for a label (unnormalized accumulator).
-    /// Preserves magnitude — use for scalar extraction via unbind.
-    /// The prototype is the weighted centroid of all observations for this label.
+    /// Get the normalized prototype for a label (unit length).
+    /// Direction only — magnitude lost. Use for prediction, not scalar extraction.
     pub fn prototype(&self, label: Label) -> Option<Vec<f64>> {
         let idx = label.index();
         if idx >= self.accumulators.len() { return None; }
         if self.accumulators[idx].count() == 0 { return None; }
         Some(self.accumulators[idx].normalize_f64())
+    }
+
+    /// Get the raw accumulator sums for a label.
+    /// Preserves magnitude — use for scalar extraction via unbind.
+    /// The sums are the weighted accumulation of ALL observations for this label.
+    /// NOT normalized. The more observations, the larger the sums.
+    pub fn raw_prototype(&self, label: Label) -> Option<&[f64]> {
+        let idx = label.index();
+        if idx >= self.accumulators.len() { return None; }
+        if self.accumulators[idx].count() == 0 { return None; }
+        Some(self.accumulators[idx].raw_sums())
     }
 
     // ── Internal ────────────────────────────────────────────────────
