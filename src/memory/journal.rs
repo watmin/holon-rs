@@ -364,9 +364,20 @@ impl Journal {
     }
 
     /// Get the discriminant for a label (for decode/analysis).
+    /// Normalized: direction only, magnitude lost.
     pub fn discriminant(&self, label: Label) -> Option<&[f64]> {
         self.discriminants.get(label.index())
             .and_then(|d| d.as_deref())
+    }
+
+    /// Get the raw prototype for a label (unnormalized accumulator).
+    /// Preserves magnitude — use for scalar extraction via unbind.
+    /// The prototype is the weighted centroid of all observations for this label.
+    pub fn prototype(&self, label: Label) -> Option<Vec<f64>> {
+        let idx = label.index();
+        if idx >= self.accumulators.len() { return None; }
+        if self.accumulators[idx].count() == 0 { return None; }
+        Some(self.accumulators[idx].normalize_f64())
     }
 
     // ── Internal ────────────────────────────────────────────────────
