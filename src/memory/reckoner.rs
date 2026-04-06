@@ -1,6 +1,6 @@
 //! Reckoner — one primitive, two readout modes.
 //!
-//! Discrete mode: N-ary discriminant learner. Backward-compatible with Journal.
+//! Discrete mode: N-ary discriminant learner with symbol labels.
 //! Continuous mode: nearest-neighbor regression over (thought, scalar) pairs.
 //!
 //! Same accumulation mechanism. Same decay. Same recalibration.
@@ -27,8 +27,62 @@
 use crate::kernel::accumulator::Accumulator;
 use crate::kernel::vector::Vector;
 
-// Re-export Label and Prediction — they are used externally and stay stable.
-pub use crate::memory::journal::{Label, LabelScore, Prediction};
+// ─── Label (symbol) ─────────────────────────────────────────────────────────
+
+/// A label is a symbol — an interned string handle.
+/// Copy, O(1) equality, no heap allocation when used.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Label(u32);
+
+impl Label {
+    /// The internal index. Useful for external arrays indexed by label.
+    pub fn index(self) -> usize { self.0 as usize }
+
+    /// Create a label from an index. Used by Reckoner and other code that
+    /// manages its own label registry.
+    pub fn from_index(idx: usize) -> Self { Label(idx as u32) }
+}
+
+impl std::fmt::Display for Label {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Label({})", self.0)
+    }
+}
+
+// ─── Prediction ─────────────────────────────────────────────────────────────
+
+/// A score for one label from a prediction.
+#[derive(Clone, Debug)]
+pub struct LabelScore {
+    /// The label handle.
+    pub label: Label,
+    /// Signed cosine against this label's discriminant direction.
+    pub cosine: f64,
+}
+
+/// The result of asking a reckoner what it thinks about a thought.
+#[derive(Clone, Debug)]
+pub struct Prediction {
+    /// Cosine score for each label, ordered by absolute cosine descending.
+    pub scores: Vec<LabelScore>,
+    /// The label with the highest absolute cosine.
+    pub direction: Option<Label>,
+    /// |max cosine| — how strongly the reckoner leans.
+    pub conviction: f64,
+    /// The raw signed cosine of the winning direction.
+    pub raw_cos: f64,
+}
+
+impl Default for Prediction {
+    fn default() -> Self {
+        Self {
+            scores: Vec::new(),
+            direction: None,
+            conviction: 0.0,
+            raw_cos: 0.0,
+        }
+    }
+}
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
@@ -160,7 +214,7 @@ impl Reckoner {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // Discrete mode — backward-compatible with Journal
+    // Discrete mode
     // ════════════════════════════════════════════════════════════════════════
 
     /// Record a labeled observation (discrete mode).

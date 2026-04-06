@@ -40,11 +40,9 @@
 //! ```
 
 pub mod engram;
-pub mod journal;
 pub mod reckoner;
 pub mod subspace;
 
 pub use engram::{Engram, EngramLibrary};
-pub use journal::{Journal, Label, LabelScore, Prediction};
-pub use reckoner::{ReckConfig, Reckoner};
+pub use reckoner::{Label, LabelScore, Prediction, ReckConfig, Reckoner};
 pub use subspace::{OnlineSubspace, StripedSubspace, StripedSubspaceSnapshot, SubspaceSnapshot};
