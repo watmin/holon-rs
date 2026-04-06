@@ -281,7 +281,7 @@ impl ScalarEncoder {
     /// Preserves the continuous rotation. Use for f64-space comparison
     /// when extracting scalars from accumulated prototypes.
     pub fn encode_f64(&self, value: f64, mode: ScalarMode) -> Vec<f64> {
-        let (angle, scale) = match mode {
+        let (angle, _scale) = match mode {
             ScalarMode::Linear { scale } => (value / scale * std::f64::consts::PI * 2.0, scale),
             ScalarMode::Circular { period } => {
                 let normalized = (value % period) / period;

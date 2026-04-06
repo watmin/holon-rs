@@ -451,12 +451,12 @@ impl OnlineSubspace {
             if norms[i] < 1e-10 {
                 continue;
             }
-            for j in 0..i {
-                if norms[j] < 1e-10 {
+            for (j, &norm_j) in norms[..i].iter().enumerate() {
+                if norm_j < 1e-10 {
                     continue;
                 }
                 // Clone row j to avoid simultaneous borrow of rows i and j.
-                let unit_j = self.components.row(j).to_owned() / norms[j];
+                let unit_j = self.components.row(j).to_owned() / norm_j;
                 let proj: f64 = self.components.row(i).dot(&unit_j);
                 self.components.row_mut(i).scaled_add(-proj, &unit_j);
             }
