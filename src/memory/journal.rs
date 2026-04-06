@@ -40,6 +40,10 @@ pub struct Label(u32);
 impl Label {
     /// The internal index. Useful for external arrays indexed by label.
     pub fn index(self) -> usize { self.0 as usize }
+
+    /// Create a label from an index. Used by Reckoner and other code that
+    /// manages its own label registry.
+    pub fn from_index(idx: usize) -> Self { Label(idx as u32) }
 }
 
 impl std::fmt::Display for Label {
