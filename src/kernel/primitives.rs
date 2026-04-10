@@ -18,56 +18,54 @@ impl Primitives {
     /// dissimilar to both inputs, but `unbind(bind(A, B), A) ≈ B`.
     ///
     /// For bipolar vectors, this is element-wise multiplication.
+    /// Zero-allocation bind. Writes element-wise multiply into caller's buffer.
+    pub fn bind_into(a: &Vector, b: &Vector, out: &mut Vector) {
+        assert_eq!(a.dimensions(), b.dimensions(), "Dimension mismatch in bind");
+        assert_eq!(a.dimensions(), out.dimensions(), "Output dimension mismatch in bind");
+        for (o, (&x, &y)) in out.data_mut().iter_mut().zip(a.data().iter().zip(b.data())) {
+            *o = x * y;
+        }
+    }
+
+    /// Bind: element-wise multiply. Allocates result. For zero-allocation, use bind_into.
     pub fn bind(a: &Vector, b: &Vector) -> Vector {
-        assert_eq!(
-            a.dimensions(),
-            b.dimensions(),
-            "Dimension mismatch in bind"
-        );
-
-        let data: Vec<i8> = a
-            .data()
-            .iter()
-            .zip(b.data().iter())
-            .map(|(&x, &y)| x * y)
-            .collect();
-
-        Vector::from_data(data)
+        let mut out = Vector::zeros(a.dimensions());
+        Self::bind_into(a, b, &mut out);
+        out
     }
 
     /// Bundle multiple vectors (element-wise majority vote).
     ///
     /// Creates a superposition that is similar to ALL input vectors.
     /// The result contains information about all inputs.
+    /// Zero-allocation bundle. Caller owns both the sums buffer and the output.
+    pub fn bundle_into(vectors: &[&Vector], sums: &mut [i32], out: &mut Vector) {
+        assert!(!vectors.is_empty(), "Cannot bundle empty vector list");
+        let dims = vectors[0].dimensions();
+        assert_eq!(sums.len(), dims, "Sums buffer dimension mismatch");
+        assert_eq!(out.dimensions(), dims, "Output dimension mismatch");
+
+        sums.iter_mut().for_each(|s| *s = 0);
+        for vec in vectors {
+            for (s, &v) in sums.iter_mut().zip(vec.data()) {
+                *s += v as i32;
+            }
+        }
+        for (o, &s) in out.data_mut().iter_mut().zip(sums.iter()) {
+            *o = if s > 0 { 1 } else if s < 0 { -1 } else { 0 };
+        }
+    }
+
+    /// Bundle: element-wise majority vote. Allocates result. For zero-allocation, use bundle_into.
     pub fn bundle(vectors: &[&Vector]) -> Vector {
         if vectors.is_empty() {
             panic!("Cannot bundle empty vector list");
         }
-
-        let dimensions = vectors[0].dimensions();
-        let mut sums = vec![0i32; dimensions];
-
-        for vec in vectors {
-            for (i, &v) in vec.data().iter().enumerate() {
-                sums[i] += v as i32;
-            }
-        }
-
-        // Threshold: positive → 1, negative → -1, zero → 0
-        let data: Vec<i8> = sums
-            .iter()
-            .map(|&s| {
-                if s > 0 {
-                    1
-                } else if s < 0 {
-                    -1
-                } else {
-                    0
-                }
-            })
-            .collect();
-
-        Vector::from_data(data)
+        let dims = vectors[0].dimensions();
+        let mut sums = vec![0i32; dims];
+        let mut out = Vector::zeros(dims);
+        Self::bundle_into(vectors, &mut sums, &mut out);
+        out
     }
 
     /// Bundle vectors with explicit weights.
