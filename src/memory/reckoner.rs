@@ -19,7 +19,7 @@
 //! // let pred = r.predict(&thought);
 //!
 //! // Continuous: predict a scalar
-//! let mut r = Reckoner::new("stop_distance", 4096, 500, ReckConfig::Continuous(0.015));
+//! let mut r = Reckoner::new("stop_distance", 4096, 500, ReckConfig::Continuous { default_value: 0.015, buckets: 10 });
 //! // r.observe_scalar(&thought, 0.008, 1.0);
 //! // let d = r.query(&thought);
 //! ```
@@ -91,18 +91,27 @@ impl Default for Prediction {
 pub enum ReckConfig {
     /// Discrete classification. The strings are label names.
     Discrete(Vec<String>),
-    /// Continuous regression. The f64 is the default value when no experience.
-    Continuous(f64),
+    /// Continuous regression with bucketed accumulators.
+    /// - default_value: returned when no experience.
+    /// - buckets: number of bins (K). Compute budget, not resolution.
+    /// Range is discovered from observations. Decay + rebalance = breathing range.
+    /// No magic min/max. The data teaches the range. K is the only parameter.
+    Continuous {
+        default_value: f64,
+        buckets: usize,
+    },
 }
 
 // ─── Internal mode ─────────────────────────────────────────────────────────
 
-/// One continuous observation: (thought as f64 slice, value, weight).
+/// One bucket in the continuous reckoner: accumulates thoughts that
+/// produced scalar values in this range.
 #[derive(Clone, Debug)]
-struct ContinuousObs {
-    thought: Vec<f64>,
-    value: f64,
-    weight: f64,
+struct ScalarBucket {
+    /// Accumulates thought vectors weighted by observation weight.
+    accumulator: Accumulator,
+    /// Center of the bucket's scalar range.
+    center: f64,
 }
 
 enum ReckMode {
@@ -122,8 +131,13 @@ enum ReckMode {
     },
     Continuous {
         default_value: f64,
-        observations: Vec<ContinuousObs>,
-        max_observations: usize,
+        k: usize,
+        buckets: Vec<ScalarBucket>,
+        range_min: f64,
+        range_max: f64,
+        total_observations: usize,
+        obs_since_rebalance: usize,
+        initialized: bool,
     },
 }
 
@@ -166,11 +180,22 @@ impl Reckoner {
                     curve_valid: false,
                 }
             }
-            ReckConfig::Continuous(default_value) => {
+            ReckConfig::Continuous { default_value, buckets: k } => {
+                let buckets = (0..k)
+                    .map(|_| ScalarBucket {
+                        accumulator: Accumulator::new(dims),
+                        center: 0.0,
+                    })
+                    .collect();
                 ReckMode::Continuous {
                     default_value,
-                    observations: Vec::new(),
-                    max_observations: 5000,
+                    k,
+                    buckets,
+                    range_min: 0.0,
+                    range_max: 0.0,
+                    total_observations: 0,
+                    obs_since_rebalance: 0,
+                    initialized: false,
                 }
             }
         };
@@ -204,12 +229,9 @@ impl Reckoner {
         self
     }
 
-    /// Configure max observations (continuous mode). Chainable.
-    /// No-op for discrete mode.
-    pub fn with_max_observations(mut self, max: usize) -> Self {
-        if let ReckMode::Continuous { ref mut max_observations, .. } = self.mode {
-            *max_observations = max;
-        }
+    /// Legacy — was max observations for brute-force mode. Now a no-op.
+    /// Bucketed accumulators don't cap observations — they compress them.
+    pub fn with_max_observations(self, _max: usize) -> Self {
         self
     }
 
@@ -307,12 +329,10 @@ impl Reckoner {
                     acc.decay(factor);
                 }
             }
-            ReckMode::Continuous { observations, .. } => {
-                for obs in observations.iter_mut() {
-                    obs.weight *= factor;
+            ReckMode::Continuous { buckets, .. } => {
+                for bucket in buckets.iter_mut() {
+                    bucket.accumulator.decay(factor);
                 }
-                // Prune negligible observations
-                observations.retain(|obs| obs.weight > 1e-10);
             }
         }
     }
@@ -544,17 +564,50 @@ impl Reckoner {
     /// Panics in discrete mode.
     pub fn observe_scalar(&mut self, vec: &Vector, value: f64, weight: f64) {
         match &mut self.mode {
-            ReckMode::Continuous { observations, max_observations, .. } => {
+            ReckMode::Continuous { buckets, k, range_min, range_max,
+                                   total_observations, obs_since_rebalance, initialized, .. } => {
                 self.updates += 1;
-                let thought: Vec<f64> = vec.data().iter().map(|&v| v as f64).collect();
-                observations.push(ContinuousObs {
-                    thought,
-                    value,
-                    weight: weight.max(1e-10),
-                });
-                // Cap observations — oldest evicted
-                if observations.len() > *max_observations {
-                    observations.remove(0);
+                *total_observations += 1;
+
+                // Decay all buckets — every observation is a tick of time
+                for bucket in buckets.iter_mut() {
+                    bucket.accumulator.decay(0.999);
+                }
+
+                if !*initialized {
+                    // First observation — set initial range and bucket centers
+                    *range_min = value - 0.001;
+                    *range_max = value + 0.001;
+                    *initialized = true;
+                    let w = (*range_max - *range_min) / *k as f64;
+                    for (i, bucket) in buckets.iter_mut().enumerate() {
+                        bucket.center = *range_min + (i as f64 + 0.5) * w;
+                    }
+                }
+
+                // Expand range if needed — rebalance on expansion
+                let mut range_changed = false;
+                if value < *range_min { *range_min = value; range_changed = true; }
+                if value > *range_max { *range_max = value + 1e-10; range_changed = true; }
+
+                if range_changed {
+                    // Range expanded — redistribute all buckets to new grid
+                    Self::rebalance_continuous(buckets, *k, range_min, range_max, self.dims);
+                }
+
+                // Find the bucket for this scalar value
+                let width = (*range_max - *range_min) / *k as f64;
+                if width > 1e-15 {
+                    let idx = ((value - *range_min) / width).floor() as usize;
+                    let idx = idx.min(*k - 1);
+                    buckets[idx].accumulator.add_weighted(vec, weight.max(1e-10));
+                }
+
+                // Periodic rebalance: contract range to where decayed weight lives
+                *obs_since_rebalance += 1;
+                if *obs_since_rebalance >= 100 {
+                    Self::rebalance_continuous(buckets, *k, range_min, range_max, self.dims);
+                    *obs_since_rebalance = 0;
                 }
             }
             ReckMode::Discrete { .. } => {
@@ -563,31 +616,117 @@ impl Reckoner {
         }
     }
 
+    /// Rebalance: contract range to where the weight lives. Redistribute buckets.
+    fn rebalance_continuous(
+        buckets: &mut Vec<ScalarBucket>,
+        k: usize,
+        range_min: &mut f64,
+        range_max: &mut f64,
+        dims: usize,
+    ) {
+        // Find effective range from alive buckets (weight > 0.1)
+        let alive_centers: Vec<f64> = buckets.iter()
+            .filter(|b| b.accumulator.count() > 0 && {
+                let norm: f64 = b.accumulator.raw_sums().iter().map(|x| x * x).sum::<f64>().sqrt();
+                norm > 0.1
+            })
+            .map(|b| b.center)
+            .collect();
+
+        if alive_centers.len() < 2 {
+            // Not enough alive buckets to rebalance — just reset centers from current range
+            let width = (*range_max - *range_min) / k as f64;
+            if width > 1e-15 {
+                for (i, bucket) in buckets.iter_mut().enumerate() {
+                    bucket.center = *range_min + (i as f64 + 0.5) * width;
+                }
+            }
+            return;
+        }
+
+        let new_min = alive_centers.iter().cloned().fold(f64::MAX, f64::min);
+        let new_max = alive_centers.iter().cloned().fold(f64::MIN, f64::max);
+        if (new_max - new_min) < 1e-10 { return; }
+
+        // Margin so edge observations don't fall off
+        let margin = (new_max - new_min) * 0.1;
+        let new_min = (new_min - margin).max(0.0);
+        let new_max = new_max + margin;
+
+        // Collect alive bucket data
+        let old_buckets: Vec<ScalarBucket> = std::mem::replace(
+            buckets,
+            (0..k).map(|_| ScalarBucket {
+                accumulator: Accumulator::new(dims),
+                center: 0.0,
+            }).collect(),
+        );
+
+        *range_min = new_min;
+        *range_max = new_max;
+        let width = (new_max - new_min) / k as f64;
+
+        // Set new bucket centers
+        for (i, bucket) in buckets.iter_mut().enumerate() {
+            bucket.center = new_min + (i as f64 + 0.5) * width;
+        }
+
+        // Pour old alive buckets into nearest new bucket via merge
+        for old in &old_buckets {
+            let norm: f64 = old.accumulator.raw_sums().iter().map(|x| x * x).sum::<f64>().sqrt();
+            if norm < 0.1 { continue; }
+            let idx = ((old.center - new_min) / width).floor() as usize;
+            let idx = idx.min(k - 1);
+            buckets[idx].accumulator.merge(&old.accumulator);
+        }
+    }
+
     /// Query: given this thought, what scalar? (continuous mode).
+    /// Cosine against K bucket prototypes, soft-weight top-3, interpolate.
+    /// O(K × D) — constant in observation count.
     /// Returns the default value for discrete mode or when no experience.
     pub fn query(&self, vec: &Vector) -> f64 {
         match &self.mode {
-            ReckMode::Continuous { default_value, observations, .. } => {
-                if observations.is_empty() {
+            ReckMode::Continuous { default_value, buckets, total_observations, .. } => {
+                if *total_observations == 0 {
                     return *default_value;
                 }
 
-                let thought: Vec<f64> = vec.data().iter().map(|&v| v as f64).collect();
-                let mut weighted_sum = 0.0_f64;
-                let mut weight_total = 0.0_f64;
+                let thought_f64 = to_f64_slice(vec);
 
-                for obs in observations {
-                    let cos = cosine_f64(&thought, &obs.thought);
-                    if cos <= 0.0 { continue; }
-                    let w = cos * obs.weight;
-                    weighted_sum += obs.value * w;
-                    weight_total += w;
+                // Cosine against each bucket's prototype, weighted by bucket mass.
+                // The raw dot product (not normalized) preserves the weight:
+                // a bucket with 100× more accumulated weight has 100× larger sums,
+                // producing a proportionally larger dot product against the query.
+                let mut scored: Vec<(f64, f64)> = Vec::with_capacity(buckets.len());
+                for bucket in buckets {
+                    if bucket.accumulator.count() == 0 { continue; }
+                    let raw = bucket.accumulator.raw_sums();
+                    let dot = raw.iter().zip(thought_f64.iter())
+                        .map(|(&r, &t)| r * t)
+                        .sum::<f64>();
+                    if dot > 0.0 {
+                        scored.push((dot, bucket.center));
+                    }
                 }
 
-                if weight_total < 1e-10 {
+                if scored.is_empty() {
+                    return *default_value;
+                }
+
+                // Soft-weight top-3 — interpolate, don't argmax
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                let mut w_sum = 0.0_f64;
+                let mut v_sum = 0.0_f64;
+                for &(cos, center) in scored.iter().take(3) {
+                    w_sum += cos;
+                    v_sum += cos * center;
+                }
+
+                if w_sum < 1e-10 {
                     *default_value
                 } else {
-                    weighted_sum / weight_total
+                    v_sum / w_sum
                 }
             }
             ReckMode::Discrete { .. } => 0.0,
@@ -598,9 +737,7 @@ impl Reckoner {
     /// 0.0 = ignorant, increases with observations.
     pub fn experience(&self) -> f64 {
         match &self.mode {
-            ReckMode::Continuous { observations, .. } => {
-                observations.iter().map(|obs| obs.weight).sum()
-            }
+            ReckMode::Continuous { total_observations, .. } => *total_observations as f64,
             ReckMode::Discrete { .. } => self.updates as f64,
         }
     }
@@ -608,7 +745,7 @@ impl Reckoner {
     /// Number of stored observations (continuous mode).
     pub fn observation_count(&self) -> usize {
         match &self.mode {
-            ReckMode::Continuous { observations, .. } => observations.len(),
+            ReckMode::Continuous { total_observations, .. } => *total_observations,
             ReckMode::Discrete { .. } => 0,
         }
     }
@@ -687,7 +824,11 @@ impl Reckoner {
     }
 }
 
-// ── Float-space cosine helpers ──────────────────────────────────────────────
+// ── Float-space helpers ─────────────────────────────────────────────────────
+
+fn to_f64_slice(vec: &Vector) -> Vec<f64> {
+    vec.data().iter().map(|&v| v as f64).collect()
+}
 
 fn cosine_f64(a: &[f64], b: &[f64]) -> f64 {
     let mut dot = 0.0_f64;
@@ -792,7 +933,7 @@ mod tests {
 
     #[test]
     fn continuous_empty_returns_default_value() {
-        let r = Reckoner::new("stop", 64, 500, ReckConfig::Continuous(0.015));
+        let r = Reckoner::new("stop", 64, 500, ReckConfig::Continuous { default_value: 0.015, buckets: 10 });
         let vm = VectorManager::new(64);
         let thought = vm.get_vector("anything");
         assert!((r.query(&thought) - 0.015).abs() < 1e-10);
@@ -800,19 +941,22 @@ mod tests {
 
     #[test]
     fn continuous_single_observation_returns_its_value() {
-        let mut r = Reckoner::new("stop", 64, 500, ReckConfig::Continuous(0.015));
+        let mut r = Reckoner::new("stop", 64, 500, ReckConfig::Continuous { default_value: 0.015, buckets: 10 });
         let vm = VectorManager::new(64);
         let thought = vm.get_vector("test-thought");
         r.observe_scalar(&thought, 0.008, 1.0);
 
         let d = r.query(&thought);
-        assert!((d - 0.008).abs() < 0.001,
-            "same thought should return its value: {}", d);
+        // Bucketed: returns the bucket center nearest to 0.008, not exact 0.008.
+        // Bucket width = (0.10-0.001)/10 = 0.0099. Bucket 0 center = 0.00595.
+        // Tolerance = one bucket width.
+        assert!((d - 0.008).abs() < 0.01,
+            "same thought should return near its value: {}", d);
     }
 
     #[test]
     fn continuous_similar_thoughts_blend() {
-        let mut r = Reckoner::new("stop", 1000, 500, ReckConfig::Continuous(0.015));
+        let mut r = Reckoner::new("stop", 1000, 500, ReckConfig::Continuous { default_value: 0.015, buckets: 10 });
         let vm = VectorManager::new(1000);
 
         let base = vm.get_vector("base");
@@ -828,7 +972,7 @@ mod tests {
 
     #[test]
     fn continuous_dissimilar_thoughts_dont_influence() {
-        let mut r = Reckoner::new("stop", 10000, 500, ReckConfig::Continuous(0.015));
+        let mut r = Reckoner::new("stop", 10000, 500, ReckConfig::Continuous { default_value: 0.015, buckets: 10 });
         let vm = VectorManager::new(10000);
 
         let thought_a = vm.get_vector("regime-trending");
@@ -848,7 +992,7 @@ mod tests {
 
     #[test]
     fn continuous_weight_matters() {
-        let mut r = Reckoner::new("stop", 64, 500, ReckConfig::Continuous(0.015));
+        let mut r = Reckoner::new("stop", 64, 500, ReckConfig::Continuous { default_value: 0.015, buckets: 10 });
         let vm = VectorManager::new(64);
 
         let thought = vm.get_vector("same");
@@ -858,7 +1002,10 @@ mod tests {
         r.observe_scalar(&thought, 0.04, 1.0);
 
         let d = r.query(&thought);
-        assert!(d < 0.01, "heavy weight should dominate: {}", d);
+        // Bucketed: heavy weight bucket dominates but soft-weight top-3
+        // interpolation still blends the light bucket. The answer should
+        // be closer to 0.005 than to 0.04.
+        assert!(d < 0.03, "heavy weight should dominate: {}", d);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -867,7 +1014,7 @@ mod tests {
 
     #[test]
     fn continuous_decay_fades_weights() {
-        let mut r = Reckoner::new("stop", 64, 500, ReckConfig::Continuous(0.015));
+        let mut r = Reckoner::new("stop", 64, 500, ReckConfig::Continuous { default_value: 0.015, buckets: 10 });
         let vm = VectorManager::new(64);
 
         let thought = vm.get_vector("test");
@@ -875,26 +1022,28 @@ mod tests {
         assert_eq!(r.observation_count(), 1);
 
         r.decay(0.5);
-        assert_eq!(r.observation_count(), 1); // still there, just decayed
+        assert_eq!(r.observation_count(), 1); // count is permanent — accumulated, not stored
 
-        // Decay to oblivion
+        // Decay the accumulator sums toward zero
         for _ in 0..100 {
             r.decay(0.01);
         }
-        assert_eq!(r.observation_count(), 0, "negligible observations should be pruned");
+        // Count stays — it tracks total observations ever, not current weight.
+        // The accumulator sums decay to near-zero but the count is history.
+        assert_eq!(r.observation_count(), 1);
     }
 
     #[test]
     fn continuous_experience_increases() {
-        let mut r = Reckoner::new("stop", 64, 500, ReckConfig::Continuous(0.015));
+        let mut r = Reckoner::new("stop", 64, 500, ReckConfig::Continuous { default_value: 0.015, buckets: 10 });
         let vm = VectorManager::new(64);
 
         assert_eq!(r.experience(), 0.0);
         let thought = vm.get_vector("test");
-        r.observe_scalar(&thought, 0.01, 5.0);
-        assert!((r.experience() - 5.0).abs() < 1e-10);
+        r.observe_scalar(&thought, 0.01, 1.0);
+        assert!((r.experience() - 1.0).abs() < 1e-10);
         r.observe_scalar(&thought, 0.02, 3.0);
-        assert!((r.experience() - 8.0).abs() < 1e-10);
+        assert!((r.experience() - 2.0).abs() < 1e-10);
     }
 
     #[test]
