@@ -47,6 +47,15 @@ pub struct SubspaceSnapshot {
     pub components: Vec<f64>,
     pub res_ema: f64,
     pub res_var_ema: f64,
+    /// Reflexive dimensionality fields (optional for backward compat).
+    #[serde(default)]
+    pub min_components: Option<usize>,
+    #[serde(default)]
+    pub max_components: Option<usize>,
+    #[serde(default)]
+    pub grow_threshold: Option<f64>,
+    #[serde(default)]
+    pub shrink_threshold: Option<f64>,
 }
 
 /// Online subspace learner using CCIPCA.
@@ -68,6 +77,12 @@ pub struct OnlineSubspace {
     ema_alpha: f64,
     sigma_mult: f64,
     reorth_interval: usize,
+
+    // Reflexive dimensionality parameters
+    min_components: usize,
+    max_components: usize,
+    grow_threshold: f64,
+    shrink_threshold: f64,
 
     mean: Array1<f64>,
     /// Row-major: row i = component i (shape k × dim).
@@ -109,6 +124,49 @@ impl OnlineSubspace {
             ema_alpha,
             sigma_mult,
             reorth_interval,
+            min_components: k,
+            max_components: 64usize.max(k * 8),
+            grow_threshold: 0.05,
+            shrink_threshold: 0.01,
+            mean: Array1::zeros(dim),
+            components: Array2::zeros((k, dim)),
+            n: 0,
+            res_ema: 0.0,
+            res_var_ema: 0.0,
+            initialized: false,
+        }
+    }
+
+    /// Create with explicit reflexive dimensionality parameters.
+    ///
+    /// - `min_components`: floor — never shrink below this K
+    /// - `max_components`: ceiling — never grow above this K
+    /// - `grow_threshold`: grow if last eigenvalue > this fraction of first (default 0.05)
+    /// - `shrink_threshold`: shrink if last eigenvalue < this fraction of first (default 0.01)
+    pub fn with_reflexive_params(
+        dim: usize,
+        k: usize,
+        amnesia: f64,
+        ema_alpha: f64,
+        sigma_mult: f64,
+        reorth_interval: usize,
+        min_components: usize,
+        max_components: usize,
+        grow_threshold: f64,
+        shrink_threshold: f64,
+    ) -> Self {
+        let k = k.min(dim).max(min_components).min(max_components);
+        Self {
+            dim,
+            k,
+            amnesia,
+            ema_alpha,
+            sigma_mult,
+            reorth_interval,
+            min_components,
+            max_components,
+            grow_threshold,
+            shrink_threshold,
             mean: Array1::zeros(dim),
             components: Array2::zeros((k, dim)),
             n: 0,
@@ -130,6 +188,12 @@ impl OnlineSubspace {
 
     pub fn n(&self) -> usize {
         self.n
+    }
+
+    /// Current number of principal components (may differ from initial K
+    /// after reflexive grow/shrink).
+    pub fn num_components(&self) -> usize {
+        self.k
     }
 
     /// Adaptive anomaly threshold: EMA(residual) + sigma_mult * sqrt(variance).
@@ -239,6 +303,13 @@ impl OnlineSubspace {
         // Update adaptive threshold via EMA
         self.update_threshold_ema(res);
 
+        // Reflexive dimensionality: grow or shrink K based on eigenvalue ratios.
+        // Mutually exclusive per update — a newly grown component starts at zero
+        // and would be immediately shrunk if both ran in the same step.
+        if !self.maybe_grow() {
+            self.maybe_shrink();
+        }
+
         // Periodic re-orthogonalization
         if self.reorth_interval > 0 && self.n % self.reorth_interval == 0 {
             self.reorthogonalize();
@@ -334,18 +405,27 @@ impl OnlineSubspace {
                 .to_vec(),
             res_ema: self.res_ema,
             res_var_ema: self.res_var_ema,
+            min_components: Some(self.min_components),
+            max_components: Some(self.max_components),
+            grow_threshold: Some(self.grow_threshold),
+            shrink_threshold: Some(self.shrink_threshold),
         }
     }
 
     /// Restore from a snapshot.
     pub fn from_snapshot(snap: SubspaceSnapshot) -> Self {
+        let k = snap.k;
         Self {
             dim: snap.dim,
-            k: snap.k,
+            k,
             amnesia: snap.amnesia,
             ema_alpha: snap.ema_alpha,
             sigma_mult: snap.sigma_mult,
             reorth_interval: snap.reorth_interval,
+            min_components: snap.min_components.unwrap_or(k),
+            max_components: snap.max_components.unwrap_or(64usize.max(k * 8)),
+            grow_threshold: snap.grow_threshold.unwrap_or(0.05),
+            shrink_threshold: snap.shrink_threshold.unwrap_or(0.01),
             n: snap.n,
             mean: Array1::from_vec(snap.mean),
             components: Array2::from_shape_vec((snap.k, snap.dim), snap.components)
@@ -441,6 +521,47 @@ impl OnlineSubspace {
         let delta = res - self.res_ema;
         self.res_ema += alpha * delta;
         self.res_var_ema = (1.0 - alpha) * self.res_var_ema + alpha * delta * delta;
+    }
+
+    /// Grow K by one if the last eigenvalue is a significant fraction of the first,
+    /// indicating the subspace hasn't captured all the variance.
+    /// Returns true if growth occurred.
+    fn maybe_grow(&mut self) -> bool {
+        if self.k >= self.max_components || self.k < 2 {
+            return false;
+        }
+        let first = self.component_norm(0).max(1e-10);
+        let last = self.component_norm(self.k - 1);
+        let ratio = last / first;
+        if ratio > self.grow_threshold {
+            // Append a zero-initialized row
+            let mut new_components = Array2::zeros((self.k + 1, self.dim));
+            for i in 0..self.k {
+                new_components.row_mut(i).assign(&self.components.row(i));
+            }
+            self.components = new_components;
+            self.k += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Shrink K by one if the last eigenvalue is negligible relative to the first,
+    /// indicating the last component captures only noise.
+    fn maybe_shrink(&mut self) {
+        if self.k <= self.min_components || self.k < 2 {
+            return;
+        }
+        let first = self.component_norm(0).max(1e-10);
+        let last = self.component_norm(self.k - 1);
+        let ratio = last / first;
+        if ratio < self.shrink_threshold {
+            // Drop last row
+            let new_components = self.components.slice(ndarray::s![..self.k - 1, ..]).to_owned();
+            self.components = new_components;
+            self.k -= 1;
+        }
     }
 
     /// Modified Gram-Schmidt re-orthogonalization preserving component norms.
@@ -968,6 +1089,208 @@ mod tests {
             "Expected explained_ratio > 0.5 after training, got {}",
             sub.explained_ratio()
         );
+    }
+
+    // =========================================================================
+    // Reflexive Dimensionality Tests
+    // =========================================================================
+
+    /// Generate vectors spanning many independent directions (high intrinsic dim).
+    fn high_rank_sample(rng_state: &mut u64, dim: usize, rank: usize) -> Vec<f64> {
+        let mut result = vec![0.0f64; dim];
+        for b in 0..rank {
+            *rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let coeff = ((*rng_state >> 33) as f64) / (u32::MAX as f64) * 2.0 - 1.0;
+            // Each basis direction hits a different slice of dimensions
+            for i in 0..dim {
+                if i % rank == b {
+                    result[i] += coeff;
+                }
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn test_reflexive_grow_high_variance_data() {
+        // Start with 4 components, feed data with many equal-variance directions.
+        // Use a distribution where each direction has exactly the same variance,
+        // so even the last component carries significant energy relative to the first.
+        let dim = 256;
+        let initial_k = 4;
+        let mut sub = OnlineSubspace::with_reflexive_params(
+            dim, initial_k,
+            2.0, 0.01, 3.5, 0,  // amnesia, ema_alpha, sigma_mult, reorth
+            initial_k, 64,       // min, max
+            0.02, 0.001,         // grow threshold lowered — CCIPCA eigenvalues decay
+        );
+        assert_eq!(sub.num_components(), initial_k);
+
+        // Generate data with uniform variance across 16 orthogonal directions.
+        // Each sample picks ONE random direction and scales it, so all directions
+        // are equally represented in the stream.
+        let mut rng = 42u64;
+        for _ in 0..2000 {
+            let mut v = vec![0.0f64; dim];
+            // Pick a random direction out of 16
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let dir = ((rng >> 33) as usize) % 16;
+            // Random magnitude
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let mag = ((rng >> 33) as f64) / (u32::MAX as f64) * 2.0 - 1.0;
+            for i in 0..dim {
+                if i % 16 == dir {
+                    v[i] = mag;
+                }
+            }
+            sub.update(&v);
+        }
+
+        assert!(
+            sub.num_components() > initial_k,
+            "Subspace should have grown from {} with high-rank data, got {}",
+            initial_k, sub.num_components()
+        );
+    }
+
+    #[test]
+    fn test_reflexive_shrink_low_rank_data() {
+        // Start with 16 components, feed data with only 3 independent directions.
+        // The subspace should shrink toward 3.
+        let dim = 256;
+        let initial_k = 16;
+        let min_k = 2;
+        let mut sub = OnlineSubspace::with_reflexive_params(
+            dim, initial_k,
+            2.0, 0.01, 3.5, 0,
+            min_k, 64,
+            0.05, 0.01,
+        );
+        assert_eq!(sub.num_components(), initial_k);
+
+        let mut rng = 42u64;
+        for _ in 0..500 {
+            let v = low_rank_sample(&mut rng, dim); // 3 directions
+            sub.update(&v);
+        }
+
+        assert!(
+            sub.num_components() < initial_k,
+            "Subspace should have shrunk from {} with low-rank data, got {}",
+            initial_k, sub.num_components()
+        );
+    }
+
+    #[test]
+    fn test_reflexive_respects_min_components() {
+        let dim = 128;
+        let min_k = 8;
+        let mut sub = OnlineSubspace::with_reflexive_params(
+            dim, 8,
+            2.0, 0.01, 3.5, 0,
+            min_k, 64,
+            0.05, 0.01,
+        );
+
+        // Feed very low-rank data (1 direction) — should not shrink below min
+        let mut rng = 42u64;
+        for _ in 0..500 {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let coeff = ((rng >> 33) as f64) / (u32::MAX as f64) * 2.0 - 1.0;
+            let v: Vec<f64> = (0..dim).map(|i| if i == 0 { coeff } else { 0.0 }).collect();
+            sub.update(&v);
+        }
+
+        assert!(
+            sub.num_components() >= min_k,
+            "Should not shrink below min_components={}, got {}",
+            min_k, sub.num_components()
+        );
+    }
+
+    #[test]
+    fn test_reflexive_respects_max_components() {
+        let dim = 256;
+        let max_k = 8;
+        let mut sub = OnlineSubspace::with_reflexive_params(
+            dim, 4,
+            2.0, 0.01, 3.5, 0,
+            2, max_k,
+            0.05, 0.01,
+        );
+
+        // Feed very high-rank data — should not grow beyond max
+        let mut rng = 42u64;
+        for _ in 0..1000 {
+            let v = random_sample(&mut rng, dim); // ~dim independent directions
+            sub.update(&v);
+        }
+
+        assert!(
+            sub.num_components() <= max_k,
+            "Should not grow beyond max_components={}, got {}",
+            max_k, sub.num_components()
+        );
+    }
+
+    #[test]
+    fn test_num_components_tracks_k() {
+        let dim = 128;
+        let mut sub = OnlineSubspace::with_reflexive_params(
+            dim, 4,
+            2.0, 0.01, 3.5, 0,
+            2, 32,
+            0.05, 0.01,
+        );
+        assert_eq!(sub.num_components(), 4);
+        assert_eq!(sub.num_components(), sub.k());
+
+        let mut rng = 42u64;
+        for _ in 0..200 {
+            let v = high_rank_sample(&mut rng, dim, 16);
+            sub.update(&v);
+        }
+
+        // num_components and k should always agree
+        assert_eq!(sub.num_components(), sub.k());
+    }
+
+    #[test]
+    fn test_reflexive_snapshot_round_trip() {
+        let dim = 128;
+        let mut sub = OnlineSubspace::with_reflexive_params(
+            dim, 4,
+            2.0, 0.01, 3.5, 0,
+            2, 32,
+            0.05, 0.01,
+        );
+
+        let mut rng = 42u64;
+        for _ in 0..200 {
+            let v = high_rank_sample(&mut rng, dim, 10);
+            sub.update(&v);
+        }
+
+        let snap = sub.snapshot();
+        let restored = OnlineSubspace::from_snapshot(snap);
+
+        assert_eq!(restored.num_components(), sub.num_components());
+        assert_eq!(restored.min_components, sub.min_components);
+        assert_eq!(restored.max_components, sub.max_components);
+        assert!((restored.grow_threshold - sub.grow_threshold).abs() < 1e-15);
+        assert!((restored.shrink_threshold - sub.shrink_threshold).abs() < 1e-15);
+
+        // Residuals should match
+        let mut rng2 = 1234u64;
+        for _ in 0..10 {
+            let v = high_rank_sample(&mut rng2, dim, 10);
+            let r1 = sub.residual(&v);
+            let r2 = restored.residual(&v);
+            assert!(
+                (r1 - r2).abs() < 1e-10,
+                "Residuals differ after reflexive snapshot round-trip: {} vs {}", r1, r2
+            );
+        }
     }
 
     // =========================================================================
