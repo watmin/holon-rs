@@ -693,27 +693,20 @@ impl Reckoner {
                 }
 
                 let thought_f64 = to_f64_slice(vec);
-                let norm_t: f64 = thought_f64.iter().map(|x| x * x).sum::<f64>().sqrt();
 
-                // Cosine similarity against each bucket's prototype direction.
-                // The prototype direction = "thoughts that produced values in this
-                // range looked like THIS." Cosine measures match quality regardless
-                // of accumulated mass. The center carries the value.
+                // Cosine against each bucket's prototype, weighted by bucket mass.
+                // The raw dot product (not normalized) preserves the weight:
+                // a bucket with 100× more accumulated weight has 100× larger sums,
+                // producing a proportionally larger dot product against the query.
                 let mut scored: Vec<(f64, f64)> = Vec::with_capacity(buckets.len());
                 for bucket in buckets {
                     if bucket.accumulator.count() == 0 { continue; }
                     let raw = bucket.accumulator.raw_sums();
-                    let dot: f64 = raw.iter().zip(thought_f64.iter())
+                    let dot = raw.iter().zip(thought_f64.iter())
                         .map(|(&r, &t)| r * t)
-                        .sum();
-                    let norm_r: f64 = raw.iter().map(|x| x * x).sum::<f64>().sqrt();
-                    let cos = if norm_r > 1e-10 && norm_t > 1e-10 {
-                        dot / (norm_r * norm_t)
-                    } else {
-                        0.0
-                    };
-                    if cos > 0.0 {
-                        scored.push((cos, bucket.center));
+                        .sum::<f64>();
+                    if dot > 0.0 {
+                        scored.push((dot, bucket.center));
                     }
                 }
 
@@ -998,27 +991,21 @@ mod tests {
     }
 
     #[test]
-    fn continuous_direction_matters() {
-        // With cosine, direction matters — not accumulated mass.
-        // Two DIFFERENT thoughts at different values: the query should
-        // return the value associated with the matching direction.
+    fn continuous_weight_matters() {
         let mut r = Reckoner::new("stop", 64, 500, ReckConfig::Continuous { default_value: 0.015, buckets: 10 });
         let vm = VectorManager::new(64);
 
-        let tight_thought = vm.get_vector("tight_market");
-        let wide_thought = vm.get_vector("wide_market");
+        let thought = vm.get_vector("same");
+        // Heavy weight on tight stop
+        r.observe_scalar(&thought, 0.005, 100.0);
+        // Light weight on wide stop
+        r.observe_scalar(&thought, 0.04, 1.0);
 
-        // Tight market → tight stop
-        r.observe_scalar(&tight_thought, 0.005, 1.0);
-        // Wide market → wide stop
-        r.observe_scalar(&wide_thought, 0.04, 1.0);
-
-        let d_tight = r.query(&tight_thought);
-        let d_wide = r.query(&wide_thought);
-
-        // Each thought should retrieve the value it was associated with
-        assert!(d_tight < d_wide,
-            "tight thought should predict tighter than wide: {} vs {}", d_tight, d_wide);
+        let d = r.query(&thought);
+        // Bucketed: heavy weight bucket dominates but soft-weight top-3
+        // interpolation still blends the light bucket. The answer should
+        // be closer to 0.005 than to 0.04.
+        assert!(d < 0.03, "heavy weight should dominate: {}", d);
     }
 
     // ════════════════════════════════════════════════════════════════════════
