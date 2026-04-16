@@ -45,6 +45,22 @@ pub enum ScalarMode {
         /// The period of the circular encoding
         period: f64,
     },
+
+    /// Thermometer encoding for continuous values with known bounds.
+    ///
+    /// Fills dimensions left-to-right: +1 up to the fractional position,
+    /// -1 for the rest. The cosine between two thermometer vectors is
+    /// `1.0 - 2.0 * |a - b| / (max - min)`. Linear gradient. No rotation.
+    /// No thresholding loss. Sign-preserving for centered ranges.
+    ///
+    /// Use for: indicator values with natural bounds (RSI 0-100),
+    /// deltas with symmetric bounds (-range, +range).
+    Thermometer {
+        /// The minimum of the value range
+        min: f64,
+        /// The maximum of the value range
+        max: f64,
+    },
 }
 
 /// Encoder for continuous scalar values.
@@ -102,6 +118,7 @@ impl ScalarEncoder {
         match mode {
             ScalarMode::Linear { scale } => self.encode_linear(value, scale),
             ScalarMode::Circular { period } => self.encode_circular(value, period),
+            ScalarMode::Thermometer { min, max } => self.encode_thermometer(value, min, max),
         }
     }
 
@@ -152,6 +169,25 @@ impl ScalarEncoder {
             })
             .collect();
 
+        Vector::from_data(data)
+    }
+
+    /// Thermometer encoding: dimension fill proportional to value position.
+    ///
+    /// value in [min, max] → first frac*D dimensions = +1, rest = -1.
+    /// cosine(a, b) = 1.0 - 2.0 * |a - b| / (max - min). Linear gradient.
+    /// Values below min clamp to all -1. Values above max clamp to all +1.
+    fn encode_thermometer(&self, value: f64, min: f64, max: f64) -> Vector {
+        let range = max - min;
+        let frac = if range == 0.0 {
+            0.5
+        } else {
+            ((value - min) / range).clamp(0.0, 1.0)
+        };
+        let threshold = (frac * self.dimensions as f64) as usize;
+        let data: Vec<i8> = (0..self.dimensions)
+            .map(|i| if i < threshold { 1 } else { -1 })
+            .collect();
         Vector::from_data(data)
     }
 
@@ -281,18 +317,35 @@ impl ScalarEncoder {
     /// Preserves the continuous rotation. Use for f64-space comparison
     /// when extracting scalars from accumulated prototypes.
     pub fn encode_f64(&self, value: f64, mode: ScalarMode) -> Vec<f64> {
-        let (angle, _scale) = match mode {
-            ScalarMode::Linear { scale } => (value / scale * std::f64::consts::PI * 2.0, scale),
-            ScalarMode::Circular { period } => {
-                let normalized = (value % period) / period;
-                (normalized * std::f64::consts::PI * 2.0, period)
+        match mode {
+            ScalarMode::Thermometer { min, max } => {
+                let range = max - min;
+                let frac = if range == 0.0 {
+                    0.5
+                } else {
+                    ((value - min) / range).clamp(0.0, 1.0)
+                };
+                let threshold = (frac * self.dimensions as f64) as usize;
+                (0..self.dimensions)
+                    .map(|i| if i < threshold { 1.0 } else { -1.0 })
+                    .collect()
             }
-        };
-        let cos_a = angle.cos();
-        let sin_a = angle.sin();
-        (0..self.dimensions)
-            .map(|i| self.base_vector[i] * cos_a + self.ortho_vector[i] * sin_a)
-            .collect()
+            _ => {
+                let (angle, _scale) = match mode {
+                    ScalarMode::Linear { scale } => (value / scale * std::f64::consts::PI * 2.0, scale),
+                    ScalarMode::Circular { period } => {
+                        let normalized = (value % period) / period;
+                        (normalized * std::f64::consts::PI * 2.0, period)
+                    }
+                    ScalarMode::Thermometer { .. } => unreachable!(),
+                };
+                let cos_a = angle.cos();
+                let sin_a = angle.sin();
+                (0..self.dimensions)
+                    .map(|i| self.base_vector[i] * cos_a + self.ortho_vector[i] * sin_a)
+                    .collect()
+            }
+        }
     }
 
     /// Encode with a custom seed (for different "dimensions" of scalars).
