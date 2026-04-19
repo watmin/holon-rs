@@ -44,6 +44,7 @@ use super::vector::Vector;
 use super::vector_manager::VectorManager;
 use sha2::{Digest, Sha256};
 use std::any::Any;
+use std::fmt;
 use std::sync::Arc;
 
 /// The universal AST for the 6 algebra core forms.
@@ -75,6 +76,36 @@ pub enum HolonAST {
     /// `Blend(a, b, w1, w2)` — `threshold(w1·a + w2·b)`.
     /// Option B per 058-002: two independent real-valued weights; negative allowed.
     Blend(Arc<HolonAST>, Arc<HolonAST>, f64, f64),
+}
+
+impl fmt::Debug for HolonAST {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HolonAST::Atom(_) => {
+                // Payload type can't be named without a registry lookup — keep
+                // the variant identifiable without exposing the opaque payload.
+                write!(f, "Atom(<opaque>)")
+            }
+            HolonAST::Bind(a, b) => f.debug_tuple("Bind").field(a).field(b).finish(),
+            HolonAST::Bundle(children) => f.debug_tuple("Bundle").field(children).finish(),
+            HolonAST::Permute(child, k) => {
+                f.debug_tuple("Permute").field(child).field(k).finish()
+            }
+            HolonAST::Thermometer { value, min, max } => f
+                .debug_struct("Thermometer")
+                .field("value", value)
+                .field("min", min)
+                .field("max", max)
+                .finish(),
+            HolonAST::Blend(a, b, w1, w2) => f
+                .debug_tuple("Blend")
+                .field(a)
+                .field(b)
+                .field(w1)
+                .field(w2)
+                .finish(),
+        }
+    }
 }
 
 impl HolonAST {
