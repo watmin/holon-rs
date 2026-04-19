@@ -505,11 +505,16 @@ pub trait Walkable {
     /// once for each (key, value) pair.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// // In your Walkable impl:
-    /// fn walk_map_visitor(&self, visitor: &mut dyn FnMut(&str, WalkableRef<'_>)) {
-    ///     visitor("name", WalkableRef::string(&self.name));
-    ///     visitor("age", WalkableRef::int(self.age as i64));
+    /// ```
+    /// use holon::kernel::walkable::{Walkable, WalkableRef, WalkType, WalkableValue};
+    /// struct Person { name: String, age: u32 }
+    /// impl Walkable for Person {
+    ///     fn walk_type(&self) -> WalkType { WalkType::Map }
+    ///     fn walk_map_items(&self) -> Vec<(&str, WalkableValue)> { Vec::new() }
+    ///     fn walk_map_visitor(&self, visitor: &mut dyn FnMut(&str, WalkableRef<'_>)) {
+    ///         visitor("name", WalkableRef::string(&self.name));
+    ///         visitor("age", WalkableRef::int(self.age as i64));
+    ///     }
     /// }
     /// ```
     fn walk_map_visitor(&self, visitor: &mut dyn FnMut(&str, WalkableRef<'_>)) {

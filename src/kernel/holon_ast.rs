@@ -666,7 +666,7 @@ mod tests {
     #[should_panic(expected = "unregistered type")]
     fn unregistered_type_panics() {
         #[derive(Debug)]
-        struct Unknown(i64);
+        struct Unknown(#[allow(dead_code)] i64);
         let (vm, se, reg) = fresh_env();
         // Unknown was not registered; encode must panic with a clear message.
         let _ = encode(&HolonAST::atom(Unknown(1)), &vm, &se, &reg);
