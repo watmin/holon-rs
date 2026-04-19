@@ -30,6 +30,7 @@
 //! ```
 
 pub mod accumulator;
+pub mod atom_registry;
 pub mod encoder;
 pub mod holon_ast;
 pub mod primitives;
@@ -40,8 +41,9 @@ pub mod vector_manager;
 pub mod walkable;
 
 pub use accumulator::Accumulator;
+pub use atom_registry::AtomTypeRegistry;
 pub use encoder::{Encoder, SequenceMode};
-pub use holon_ast::{atom_value, encode, HolonAST};
+pub use holon_ast::{atom_value, canonical_edn_holon, encode, HolonAST};
 pub use primitives::{AttendMode, GateMode, NegateMethod, Primitives, SegmentMethod};
 pub use scalar::{ScalarEncoder, ScalarMode};
 pub use similarity::{Metric, Similarity};
