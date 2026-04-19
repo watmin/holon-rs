@@ -47,6 +47,10 @@ use std::any::Any;
 use std::sync::Arc;
 
 /// The universal AST for the 6 algebra core forms.
+///
+/// `Clone` is derived — all variants are `Arc`-wrapped, so clone is
+/// O(1) refcount-increment regardless of tree depth.
+#[derive(Clone)]
 pub enum HolonAST {
     /// `Atom(T)` — parametric over any Rust type T. See module doc.
     Atom(Arc<dyn Any + Send + Sync>),
