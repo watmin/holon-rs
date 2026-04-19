@@ -26,6 +26,16 @@
 //!
 //! `:Any` is NOT a wat-level type. The grammar refuses it; the type checker
 //! refuses it. `dyn Any` is Rust substrate plumbing, never wat-visible.
+//!
+//! # Keywords
+//!
+//! Rust has no symbol type. Wat keywords (`:foo`, `:wat/std/cos-basis`) are
+//! represented as `String` values whose content begins with `:`. The leading
+//! `:` is part of the canonical bytes, so `HolonAST::keyword("foo")` and
+//! `HolonAST::atom("foo".to_string())` produce different vectors — the byte
+//! layouts differ. Use [`HolonAST::keyword`] to construct keyword atoms; the
+//! wat-vm parser will produce them from source like `:foo`. String atoms use
+//! [`HolonAST::atom`] with a `String` that does not begin with `:`.
 
 use super::atom_registry::AtomTypeRegistry;
 use super::primitives::Primitives;
@@ -70,6 +80,40 @@ impl HolonAST {
     /// type that isn't registered panics at encode time with a clear message.
     pub fn atom<T: Any + Send + Sync + 'static>(value: T) -> Self {
         HolonAST::Atom(Arc::new(value))
+    }
+
+    /// Construct an Atom wrapping a wat keyword.
+    ///
+    /// Rust has no symbol type; wat keywords are represented at the Rust
+    /// level as `String` values whose content begins with `:`. The leading
+    /// `:` is part of the stored bytes and the hash input, so
+    /// `HolonAST::keyword("foo")` (stored as `":foo"`) produces a different
+    /// vector from `HolonAST::atom("foo".to_string())` (stored as `"foo"`).
+    ///
+    /// The input may or may not already carry the leading `:`:
+    ///
+    /// ```
+    /// use holon::HolonAST;
+    /// // All three create the same keyword atom — leading colon enforced:
+    /// let k1 = HolonAST::keyword("foo/bar");
+    /// let k2 = HolonAST::keyword(":foo/bar");
+    /// // k1 and k2 hold identical String payloads ":foo/bar".
+    /// ```
+    ///
+    /// This is the storage convention the wat-vm parser will produce: source
+    /// `:foo/bar` → `HolonAST::keyword("foo/bar")`; source `"foo/bar"` →
+    /// `HolonAST::atom("foo/bar".to_string())`. Different content → different
+    /// canonical bytes → different vectors, no collision.
+    pub fn keyword(name: &str) -> Self {
+        let stored = if name.starts_with(':') {
+            name.to_string()
+        } else {
+            let mut s = String::with_capacity(name.len() + 1);
+            s.push(':');
+            s.push_str(name);
+            s
+        };
+        HolonAST::atom(stored)
     }
 
     /// Construct a Bind node.
@@ -320,6 +364,45 @@ mod tests {
         let v_i32 = encode(&HolonAST::atom(42_i32), &vm, &se, &reg);
         let v_i64 = encode(&HolonAST::atom(42_i64), &vm, &se, &reg);
         assert_ne!(v_i32, v_i64);
+    }
+
+    #[test]
+    fn keyword_vs_string_discrimination() {
+        // Wat keywords are stored as Strings with leading `:`; wat strings are
+        // Strings without. Content differs → hash differs → vectors differ.
+        let (vm, se, reg) = fresh_env();
+        let v_kw = encode(&HolonAST::keyword("foo/bar"), &vm, &se, &reg);
+        let v_str = encode(&HolonAST::atom("foo/bar".to_string()), &vm, &se, &reg);
+        assert_ne!(
+            v_kw, v_str,
+            "Keyword :foo/bar must differ from string \"foo/bar\" — \
+             the leading `:` is part of the stored bytes"
+        );
+    }
+
+    #[test]
+    fn keyword_normalization() {
+        // HolonAST::keyword accepts the name with or without the leading `:`
+        // and always stores with the colon. Both spellings produce the same atom.
+        let (vm, se, reg) = fresh_env();
+        let v_no_colon = encode(&HolonAST::keyword("foo"), &vm, &se, &reg);
+        let v_with_colon = encode(&HolonAST::keyword(":foo"), &vm, &se, &reg);
+        assert_eq!(
+            v_no_colon, v_with_colon,
+            "HolonAST::keyword must normalize the leading colon"
+        );
+    }
+
+    #[test]
+    fn keyword_vs_prefixed_string() {
+        // Atom(":foo".to_string()) and HolonAST::keyword("foo") both store
+        // ":foo" as a String — they are the same atom, same vector. This is
+        // the parser's contract: wat source `:foo` produces the colon-prefixed
+        // String regardless of which helper constructs it.
+        let (vm, se, reg) = fresh_env();
+        let v_kw = encode(&HolonAST::keyword("foo"), &vm, &se, &reg);
+        let v_direct = encode(&HolonAST::atom(":foo".to_string()), &vm, &se, &reg);
+        assert_eq!(v_kw, v_direct);
     }
 
     #[test]
