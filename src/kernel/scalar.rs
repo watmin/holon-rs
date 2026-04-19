@@ -178,13 +178,17 @@ impl ScalarEncoder {
     /// cosine(a, b) = 1.0 - 2.0 * |a - b| / (max - min). Linear gradient.
     /// Values below min clamp to all -1. Values above max clamp to all +1.
     fn encode_thermometer(&self, value: f64, min: f64, max: f64) -> Vector {
+        // Canonical layout per CORE-AUDIT / 058-023:
+        //   N = round(d · clamp((value - min) / (max - min), 0, 1))
+        // First N dims are +1, remaining d - N dims are -1.
+        // Bit-identical across nodes at the same d.
         let range = max - min;
         let frac = if range == 0.0 {
             0.5
         } else {
             ((value - min) / range).clamp(0.0, 1.0)
         };
-        let threshold = (frac * self.dimensions as f64) as usize;
+        let threshold = (frac * self.dimensions as f64).round() as usize;
         let data: Vec<i8> = (0..self.dimensions)
             .map(|i| if i < threshold { 1 } else { -1 })
             .collect();

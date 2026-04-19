@@ -31,6 +31,7 @@
 
 pub mod accumulator;
 pub mod encoder;
+pub mod holon_ast;
 pub mod primitives;
 pub mod scalar;
 pub mod similarity;
@@ -40,6 +41,7 @@ pub mod walkable;
 
 pub use accumulator::Accumulator;
 pub use encoder::{Encoder, SequenceMode};
+pub use holon_ast::{atom_value, encode, HolonAST};
 pub use primitives::{AttendMode, GateMode, NegateMethod, Primitives, SegmentMethod};
 pub use scalar::{ScalarEncoder, ScalarMode};
 pub use similarity::{Metric, Similarity};

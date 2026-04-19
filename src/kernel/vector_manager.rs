@@ -44,6 +44,15 @@ impl VectorManager {
         self.dimensions
     }
 
+    /// Get the global seed used for deterministic vector generation.
+    ///
+    /// Exposed so callers (e.g. `HolonAST` encoding) can mix the same seed
+    /// into their own hash inputs, keeping vectors consistent across all
+    /// paths that materialize from this manager's perspective.
+    pub fn global_seed(&self) -> u64 {
+        self.global_seed
+    }
+
     /// Get the vector for an atomic value.
     ///
     /// If the vector has been computed before, returns it from cache.

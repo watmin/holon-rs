@@ -337,25 +337,30 @@ impl Primitives {
         Vector::from_data(data)
     }
 
-    /// Weighted interpolation between two vectors.
+    /// Blend with two independent real-valued scalar weights — Option B.
     ///
-    /// `alpha = 0.0` returns vec1, `alpha = 1.0` returns vec2.
-    pub fn blend(vec1: &Vector, vec2: &Vector, alpha: f64) -> Vector {
+    /// `threshold(w1·a + w2·b)` in the ternary output space `{-1, 0, +1}^d`.
+    /// Weights can be any real numbers including negative; zero weights silence
+    /// their input. See 058-002's ACCEPTED banner.
+    ///
+    /// Stdlib macros compose over this: `Subtract = Blend(a, b, 1, -1)`,
+    /// `Amplify = Blend(a, b, 1, s)`, `Circular = Blend(cos_basis, sin_basis, cos θ, sin θ)`.
+    pub fn blend_weighted(a: &Vector, b: &Vector, w1: f64, w2: f64) -> Vector {
         assert_eq!(
-            vec1.dimensions(),
-            vec2.dimensions(),
-            "Dimension mismatch in blend"
+            a.dimensions(),
+            b.dimensions(),
+            "Dimension mismatch in blend_weighted"
         );
 
-        let data: Vec<i8> = vec1
+        let data: Vec<i8> = a
             .data()
             .iter()
-            .zip(vec2.data().iter())
-            .map(|(&v1, &v2)| {
-                let result = (v1 as f64) * (1.0 - alpha) + (v2 as f64) * alpha;
-                if result > 0.0 {
+            .zip(b.data().iter())
+            .map(|(&va, &vb)| {
+                let sum = (va as f64) * w1 + (vb as f64) * w2;
+                if sum > 0.0 {
                     1
-                } else if result < 0.0 {
+                } else if sum < 0.0 {
                     -1
                 } else {
                     0
@@ -364,6 +369,16 @@ impl Primitives {
             .collect();
 
         Vector::from_data(data)
+    }
+
+    /// Convex blend between two vectors — thin wrapper over [`blend_weighted`].
+    ///
+    /// `alpha = 0.0` returns `vec1`, `alpha = 1.0` returns `vec2`. Equivalent to
+    /// `blend_weighted(vec1, vec2, 1.0 - alpha, alpha)`. Kept for backwards
+    /// compatibility with pre-058 callers; new code should prefer
+    /// [`blend_weighted`] directly to express non-convex weight combinations.
+    pub fn blend(vec1: &Vector, vec2: &Vector, alpha: f64) -> Vector {
+        Self::blend_weighted(vec1, vec2, 1.0 - alpha, alpha)
     }
 
     /// Extract the part of vec that resonates with reference.
@@ -388,16 +403,19 @@ impl Primitives {
 
     /// Circular shift (permutation) of vector dimensions.
     ///
-    /// Used for encoding sequential position.
+    /// Canonical form per CORE-AUDIT: `Permute(v, k)[i] = v[(i + k) mod d]`
+    /// where P is cyclic shift by one position, `P(i) = (i + 1) mod d`, and
+    /// `P^k(i) = (i + k) mod d`. `Permute(v, -k)` is the exact inverse of
+    /// `Permute(v, k)`.
     pub fn permute(vec: &Vector, k: i32) -> Vector {
         let n = vec.dimensions() as i32;
-        let shift = ((k % n) + n) % n; // Handle negative shifts
+        let shift = ((k % n) + n) % n; // Normalize negative shifts to [0, n)
 
         let mut data = vec![0i8; vec.dimensions()];
-
-        for (i, &v) in vec.data().iter().enumerate() {
-            let new_pos = ((i as i32 + shift) % n) as usize;
-            data[new_pos] = v;
+        let src = vec.data();
+        for i in 0..vec.dimensions() {
+            let src_idx = ((i as i32 + shift) % n) as usize;
+            data[i] = src[src_idx];
         }
 
         Vector::from_data(data)
@@ -1328,12 +1346,19 @@ mod tests {
 
     #[test]
     fn test_permute_circular() {
+        // Canonical form per CORE-AUDIT: Permute(v, k)[i] = v[(i + k) mod d].
+        // For v = [1, 2, 3, 4, 5] and k = 2:
+        //   out[0] = v[2] = 3
+        //   out[1] = v[3] = 4
+        //   out[2] = v[4] = 5
+        //   out[3] = v[0] = 1
+        //   out[4] = v[1] = 2
         let v = Vector::from_data(vec![1, 2, 3, 4, 5]);
 
         let shifted = Primitives::permute(&v, 2);
-        assert_eq!(shifted.data(), &[4, 5, 1, 2, 3]);
+        assert_eq!(shifted.data(), &[3, 4, 5, 1, 2]);
 
-        // Inverse shift
+        // Inverse shift — Permute(v, -k) undoes Permute(v, k).
         let restored = Primitives::permute(&shifted, -2);
         assert_eq!(restored.data(), &[1, 2, 3, 4, 5]);
     }
