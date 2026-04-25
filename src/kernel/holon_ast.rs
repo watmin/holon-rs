@@ -271,7 +271,7 @@ fn atom_seed(
     let mut hasher = Sha256::new();
     hasher.update(global_seed.to_le_bytes());
     hasher.update(tag.as_bytes());
-    hasher.update(&(bytes.len() as u32).to_le_bytes());
+    hasher.update((bytes.len() as u32).to_le_bytes());
     hasher.update(&bytes);
     let hash = hasher.finalize();
 

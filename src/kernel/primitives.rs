@@ -413,9 +413,9 @@ impl Primitives {
 
         let mut data = vec![0i8; vec.dimensions()];
         let src = vec.data();
-        for i in 0..vec.dimensions() {
+        for (i, dst) in data.iter_mut().enumerate() {
             let src_idx = ((i as i32 + shift) % n) as usize;
-            data[i] = src[src_idx];
+            *dst = src[src_idx];
         }
 
         Vector::from_data(data)
@@ -1573,7 +1573,7 @@ mod tests {
         let b = make_bipolar(64, 1);
         let c = Primitives::centroid(&[&a, &b]);
         for &v in c.data() {
-            assert!(v >= -1 && v <= 1);
+            assert!((-1..=1).contains(&v));
         }
     }
 
@@ -1671,7 +1671,7 @@ mod tests {
     fn test_entropy_range() {
         let vec = make_bipolar(1024, 0);
         let h = Primitives::entropy(&vec);
-        assert!(h >= 0.0 && h <= 1.0);
+        assert!((0.0..=1.0).contains(&h));
     }
 
     #[test]
@@ -1796,7 +1796,7 @@ mod tests {
 
         assert_eq!(regular, bundled);
         assert_eq!(margins.len(), 256);
-        assert!(margins.iter().all(|&m| m >= 0.0 && m <= 1.0));
+        assert!(margins.iter().all(|m| (0.0..=1.0).contains(m)));
     }
 
     #[test]
@@ -1877,7 +1877,7 @@ mod tests {
     #[test]
     fn test_drift_rate_short_stream() {
         let v = make_bipolar(64, 0);
-        assert!(Primitives::drift_rate(&[v.clone()], 1).is_empty());
+        assert!(Primitives::drift_rate(std::slice::from_ref(&v), 1).is_empty());
         assert!(Primitives::drift_rate(&[v.clone(), v.clone()], 1).is_empty());
     }
 

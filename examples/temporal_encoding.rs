@@ -248,7 +248,7 @@ fn main() {
     println!("  TimeFloat composes naturally with other fields in a Walkable struct.");
     println!("  LogEntry {{ service, level, timestamp }} encodes all fields together.\n");
 
-    let entries = vec![
+    let entries = [
         LogEntry { service: "auth".into(), level: "INFO".into(),  timestamp: t0 },
         LogEntry { service: "auth".into(), level: "INFO".into(),  timestamp: t0 + 300.0 }, // 5 min later
         LogEntry { service: "auth".into(), level: "ERROR".into(), timestamp: t0 },

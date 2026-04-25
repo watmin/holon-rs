@@ -736,7 +736,8 @@ fn main() {
     println!("---------------------------------------------------------------------------\n");
 
     // Attack scenarios
-    let attacks: Vec<(&str, fn(&mut u64) -> Packet)> = vec![
+    type AttackGen = fn(&mut u64) -> Packet;
+    let attacks: Vec<(&str, AttackGen)> = vec![
         ("DNS Reflection", generate_dns_reflection),
         ("SYN Flood", generate_syn_flood),
         ("ICMP Flood", generate_icmp_flood),

@@ -336,7 +336,7 @@ fn demo_practical_traffic_analysis(holon: &Holon) {
         let sim = holon.similarity(&baseline, &vec);
         let anomaly_score = 1.0 - sim;
 
-        let bar_len = (anomaly_score * 40.0).max(0.0).min(40.0) as usize;
+        let bar_len = (anomaly_score * 40.0).clamp(0.0, 40.0) as usize;
         let bar = format!("{}{}", "█".repeat(bar_len), "░".repeat(40 - bar_len));
 
         println!("  ts={:2}  {:8}  {:>10} pps  anomaly={:.3}  [{}]",

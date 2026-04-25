@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn test_verify_determinism() {
         // Same seed, different VectorManager instances → same vectors
-        let atoms = vec!["alpha", "beta", "gamma", "delta", "epsilon"];
+        let atoms = ["alpha", "beta", "gamma", "delta", "epsilon"];
         let seed = 12345;
 
         for _ in 0..3 {

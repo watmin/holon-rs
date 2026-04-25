@@ -643,32 +643,27 @@ fn main() {
 
         for _ in 0..scaled_packets {
             // Generate packet
-            let packet = if phase.phase_type == Phase::Attack
-                && phase.attack_type.is_some()
-                && rng.random() < phase.attack_fraction
-            {
-                gen_attack(&mut rng, phase.attack_type.unwrap())
-            } else {
-                gen_normal(&mut rng)
+            let packet = match phase.attack_type {
+                Some(at) if phase.phase_type == Phase::Attack
+                    && rng.random() < phase.attack_fraction => gen_attack(&mut rng, at),
+                _ => gen_normal(&mut rng),
             };
 
             // Detect
             let result = detector.process(&packet, phase.packets_per_second as f64);
 
-            if detector.warmup_complete {
-                if result.is_anomalous {
-                    phase_detections += 1;
+            if detector.warmup_complete && result.is_anomalous {
+                phase_detections += 1;
 
-                    // Capture sample alert
-                    if sample_alerts.len() < 5 {
-                        if let Some(ref expl) = result.explanation {
-                            if expl != "Traffic matches learned baseline" {
-                                sample_alerts.push((
-                                    result.packet_num,
-                                    phase.name.to_string(),
-                                    expl.clone(),
-                                ));
-                            }
+                // Capture sample alert
+                if sample_alerts.len() < 5 {
+                    if let Some(ref expl) = result.explanation {
+                        if expl != "Traffic matches learned baseline" {
+                            sample_alerts.push((
+                                result.packet_num,
+                                phase.name.to_string(),
+                                expl.clone(),
+                            ));
                         }
                     }
                 }

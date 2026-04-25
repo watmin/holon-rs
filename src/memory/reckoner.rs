@@ -1,6 +1,6 @@
 //! Reckoner — one primitive, two readout modes.
 //!
-//! Discrete mode: N-ary discriminant learner with symbol labels.
+//! Discrete mode: N-ary discriminant learner with `HolonAST` labels.
 //! Continuous mode: nearest-neighbor regression over (thought, scalar) pairs.
 //!
 //! Same accumulation mechanism. Same decay. Same recalibration.
@@ -9,10 +9,11 @@
 //!
 //! ```rust
 //! use holon::memory::reckoner::{Reckoner, ReckConfig};
+//! use holon::HolonAST;
 //!
-//! // Discrete: classify into Win/Loss
+//! // Discrete: classify into :Win / :Loss
 //! let mut r = Reckoner::new("direction", 4096, 500, ReckConfig::Discrete(vec![
-//!     "Win".into(), "Loss".into(),
+//!     HolonAST::keyword("Win"), HolonAST::keyword("Loss"),
 //! ]));
 //! let labels = r.labels();
 //! // r.observe(&thought, labels[0], 1.0);
@@ -26,6 +27,7 @@
 
 use crate::kernel::accumulator::Accumulator;
 use crate::kernel::vector::Vector;
+use crate::kernel::HolonAST;
 
 // ─── Label (symbol) ─────────────────────────────────────────────────────────
 
@@ -89,11 +91,15 @@ impl Default for Prediction {
 /// Configuration for a Reckoner. Determines its readout mode.
 #[derive(Clone, Debug)]
 pub enum ReckConfig {
-    /// Discrete classification. The strings are label names.
-    Discrete(Vec<String>),
+    /// Discrete classification. The ASTs are the wat-typed labels — one
+    /// accumulator per AST, addressed at runtime through a [`Label`] handle.
+    /// Duplicates are not deduped; the caller is responsible for distinct ASTs.
+    Discrete(Vec<HolonAST>),
     /// Continuous regression with bucketed accumulators.
+    ///
     /// - default_value: returned when no experience.
     /// - buckets: number of bins (K). Compute budget, not resolution.
+    ///
     /// Range is discovered from observations. Decay + rebalance = breathing range.
     /// No magic min/max. The data teaches the range. K is the only parameter.
     Continuous {
@@ -116,7 +122,7 @@ struct ScalarBucket {
 
 enum ReckMode {
     Discrete {
-        label_names: Vec<String>,
+        label_asts: Vec<HolonAST>,
         accumulators: Vec<Accumulator>,
         discriminants: Vec<Option<Vec<f64>>>,
         mean_proto: Option<Vec<f64>>,
@@ -164,10 +170,10 @@ impl Reckoner {
     /// - `config`: determines discrete or continuous mode.
     pub fn new(name: &str, dims: usize, recalib_interval: usize, config: ReckConfig) -> Self {
         let mode = match config {
-            ReckConfig::Discrete(label_names) => {
-                let n = label_names.len();
+            ReckConfig::Discrete(label_asts) => {
+                let n = label_asts.len();
                 ReckMode::Discrete {
-                    label_names,
+                    label_asts,
                     accumulators: (0..n).map(|_| Accumulator::new(dims)).collect(),
                     discriminants: vec![None; n],
                     mean_proto: None,
@@ -268,12 +274,12 @@ impl Reckoner {
     /// Returns default Prediction for continuous mode.
     pub fn predict(&self, vec: &Vector) -> Prediction {
         match &self.mode {
-            ReckMode::Discrete { label_names, discriminants, mean_proto, .. } => {
+            ReckMode::Discrete { label_asts, discriminants, mean_proto, .. } => {
                 if discriminants.iter().all(|d| d.is_none()) {
                     return Prediction::default();
                 }
 
-                let mut scores: Vec<LabelScore> = Vec::with_capacity(label_names.len());
+                let mut scores: Vec<LabelScore> = Vec::with_capacity(label_asts.len());
 
                 for (i, disc_opt) in discriminants.iter().enumerate() {
                     let cos = if let Some(disc) = disc_opt {
@@ -354,7 +360,7 @@ impl Reckoner {
     /// Returns (a, b) or None if insufficient data or continuous mode.
     pub fn curve(&mut self) -> Option<(f64, f64)> {
         if let ReckMode::Discrete {
-            ref label_names,
+            ref label_asts,
             ref resolved,
             min_resolved,
             n_bins,
@@ -364,7 +370,7 @@ impl Reckoner {
             ..
         } = self.mode
         {
-            let n_labels = label_names.len();
+            let n_labels = label_asts.len();
             if n_labels < 2 { return None; }
             if resolved.len() < min_resolved { return None; }
 
@@ -417,9 +423,9 @@ impl Reckoner {
 
     /// Evaluate accuracy at a given conviction level using the fitted curve.
     pub fn accuracy_at(&self, conviction: f64) -> Option<f64> {
-        if let ReckMode::Discrete { ref label_names, curve_a, curve_b, curve_valid, .. } = self.mode {
+        if let ReckMode::Discrete { ref label_asts, curve_a, curve_b, curve_valid, .. } = self.mode {
             if !curve_valid { return None; }
-            let n_labels = label_names.len();
+            let n_labels = label_asts.len();
             if n_labels < 2 { return None; }
             let base = 1.0 / n_labels as f64;
             Some((base + curve_a * (curve_b * conviction).exp()).min(0.99))
@@ -452,12 +458,13 @@ impl Reckoner {
 
     // ── Label resolution (discrete mode) ────────────────────────────────────
 
-    /// Resolve a label handle to its name.
-    pub fn label_name(&self, label: Label) -> Option<&str> {
+    /// Resolve a label handle to its `HolonAST`.
+    ///
+    /// Use [`crate::canonical_edn_holon`] with your `AtomTypeRegistry` to get
+    /// a stable byte form for logging or hashing.
+    pub fn label_ast(&self, label: Label) -> Option<&HolonAST> {
         match &self.mode {
-            ReckMode::Discrete { label_names, .. } => {
-                label_names.get(label.index()).map(|s| s.as_str())
-            }
+            ReckMode::Discrete { label_asts, .. } => label_asts.get(label.index()),
             ReckMode::Continuous { .. } => None,
         }
     }
@@ -465,8 +472,8 @@ impl Reckoner {
     /// Get all registered labels (discrete mode). Empty for continuous.
     pub fn labels(&self) -> Vec<Label> {
         match &self.mode {
-            ReckMode::Discrete { label_names, .. } => {
-                (0..label_names.len()).map(Label::from_index).collect()
+            ReckMode::Discrete { label_asts, .. } => {
+                (0..label_asts.len()).map(Label::from_index).collect()
             }
             ReckMode::Continuous { .. } => Vec::new(),
         }
@@ -479,7 +486,7 @@ impl Reckoner {
 
     pub fn n_labels(&self) -> usize {
         match &self.mode {
-            ReckMode::Discrete { label_names, .. } => label_names.len(),
+            ReckMode::Discrete { label_asts, .. } => label_asts.len(),
             ReckMode::Continuous { .. } => 0,
         }
     }
@@ -762,8 +769,8 @@ impl Reckoner {
     fn recalibrate(&mut self) {
         // Only meaningful for discrete mode
         let (label_count, all_have_obs, dims) = match &self.mode {
-            ReckMode::Discrete { label_names, accumulators, .. } => {
-                (label_names.len(), !accumulators.iter().any(|a| a.count() == 0), self.dims)
+            ReckMode::Discrete { label_asts, accumulators, .. } => {
+                (label_asts.len(), !accumulators.iter().any(|a| a.count() == 0), self.dims)
             }
             _ => return,
         };
@@ -877,7 +884,7 @@ mod tests {
     #[test]
     fn discrete_empty_returns_default_prediction() {
         let r = Reckoner::new("test", 1024, 10, ReckConfig::Discrete(vec![
-            "Win".into(), "Loss".into(),
+            HolonAST::keyword("Win"), HolonAST::keyword("Loss"),
         ]));
         let vm = VectorManager::new(1024);
         let probe = vm.get_vector("anything");
@@ -890,7 +897,7 @@ mod tests {
     fn discrete_observe_predict_returns_correct_label() {
         let vm = VectorManager::new(1024);
         let mut r = Reckoner::new("test", 1024, 10, ReckConfig::Discrete(vec![
-            "Buy".into(), "Sell".into(),
+            HolonAST::keyword("Buy"), HolonAST::keyword("Sell"),
         ]));
         let labels = r.labels();
         let buy = labels[0];
@@ -916,7 +923,7 @@ mod tests {
     fn discrete_decay_fades_old_observations() {
         let vm = VectorManager::new(1024);
         let mut r = Reckoner::new("test", 1024, 100, ReckConfig::Discrete(vec![
-            "A".into(), "B".into(),
+            HolonAST::keyword("A"), HolonAST::keyword("B"),
         ]));
         let labels = r.labels();
         let a = labels[0];
@@ -973,7 +980,7 @@ mod tests {
 
         let d = r.query(&base);
         // Should be between 0.01 and 0.02
-        assert!(d >= 0.009 && d <= 0.021,
+        assert!((0.009..=0.021).contains(&d),
             "similar thoughts should blend: {}", d);
     }
 
@@ -1063,7 +1070,7 @@ mod tests {
     fn discrete_ternary() {
         let vm = VectorManager::new(1024);
         let mut r = Reckoner::new("sentiment", 1024, 10, ReckConfig::Discrete(vec![
-            "Positive".into(), "Negative".into(), "Neutral".into(),
+            HolonAST::keyword("Positive"), HolonAST::keyword("Negative"), HolonAST::keyword("Neutral"),
         ]));
         let labels = r.labels();
 
@@ -1079,9 +1086,30 @@ mod tests {
     }
 
     #[test]
+    fn discrete_label_ast_roundtrip() {
+        // Labels can be arbitrary HolonAST — keyword, atom, or compound.
+        // The reckoner stores them by index and round-trips them through
+        // `label_ast(Label)`.
+        let win = HolonAST::keyword("Win");
+        let loss = HolonAST::keyword("Loss");
+        let composite = HolonAST::bind(HolonAST::keyword("side"), HolonAST::atom(1_i64));
+
+        let r = Reckoner::new("multi-shape", 64, 10, ReckConfig::Discrete(vec![
+            win.clone(), loss.clone(), composite.clone(),
+        ]));
+
+        let labels = r.labels();
+        assert_eq!(labels.len(), 3);
+        assert!(matches!(r.label_ast(labels[0]), Some(HolonAST::Atom(_))));
+        assert!(matches!(r.label_ast(labels[2]), Some(HolonAST::Bind(_, _))));
+        // Out-of-range handle → None.
+        assert!(r.label_ast(Label::from_index(99)).is_none());
+    }
+
+    #[test]
     fn discrete_curve_with_signal() {
         let mut r = Reckoner::new("test", 1024, 10, ReckConfig::Discrete(vec![
-            "A".into(), "B".into(),
+            HolonAST::keyword("A"), HolonAST::keyword("B"),
         ]));
 
         use std::collections::hash_map::DefaultHasher;

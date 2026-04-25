@@ -126,16 +126,17 @@ impl WindowedAnalyzer {
         let end = std::cmp::min(start + WINDOW_SIZE, payload.len());
         let mut results = Vec::new();
 
-        for i in start..end {
-            let field = format!("p{}", i - start);
-            let value = format!("0x{:02x}", payload[i]);
+        for (offset, &byte) in payload[start..end].iter().enumerate() {
+            let i = start + offset;
+            let field = format!("p{}", offset);
+            let value = format!("0x{:02x}", byte);
             let role = self.holon.get_vector(&field);
             let val = self.holon.get_vector(&value);
             let bound = self.holon.bind(&role, &val);
             let sim = self.holon.similarity(&bound, baseline);
             results.push(DrillResult {
                 pos: i,
-                byte_val: payload[i],
+                byte_val: byte,
                 sim,
             });
         }
@@ -711,7 +712,7 @@ fn run_scenario(
     if !sorted_ext.is_empty() {
         let mut start = sorted_ext[0];
         let mut prev = sorted_ext[0];
-        let mut constant = if pos_data.get(&start).map_or(false, |i| i.is_constant) {
+        let mut constant = if pos_data.get(&start).is_some_and(|i| i.is_constant) {
             1
         } else {
             0
@@ -719,7 +720,7 @@ fn run_scenario(
 
         for &pos in &sorted_ext[1..] {
             if pos == prev + 1 {
-                if pos_data.get(&pos).map_or(false, |i| i.is_constant) {
+                if pos_data.get(&pos).is_some_and(|i| i.is_constant) {
                     constant += 1;
                 }
                 prev = pos;
@@ -727,7 +728,7 @@ fn run_scenario(
                 runs.push((start, prev, constant));
                 start = pos;
                 prev = pos;
-                constant = if pos_data.get(&pos).map_or(false, |i| i.is_constant) {
+                constant = if pos_data.get(&pos).is_some_and(|i| i.is_constant) {
                     1
                 } else {
                     0

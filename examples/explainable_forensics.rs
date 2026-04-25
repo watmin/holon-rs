@@ -253,7 +253,7 @@ fn main() {
     for (range, name) in phases.iter() {
         let complexities: Vec<f64> = vectors[range.clone()]
             .iter()
-            .map(|v| Primitives::complexity(v))
+            .map(Primitives::complexity)
             .collect();
         let avg: f64 = complexities.iter().sum::<f64>() / complexities.len() as f64;
         println!("{:<25} {:>15.4}", name, avg);

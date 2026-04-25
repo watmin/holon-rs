@@ -185,7 +185,7 @@ fn main() {
     let ntp_proto = holon.prototype(&ntp_vecs.iter().collect::<Vec<_>>(), 0.5);
 
     // Baseline complexity
-    let baseline_complexity: f64 = normal_vecs.iter().map(|v| Primitives::complexity(v)).sum::<f64>() / normal_vecs.len() as f64;
+    let baseline_complexity: f64 = normal_vecs.iter().map(Primitives::complexity).sum::<f64>() / normal_vecs.len() as f64;
 
     println!("Learned baseline from {} packets", normal_train.len());
     println!("  Baseline complexity: {:.4}", baseline_complexity);

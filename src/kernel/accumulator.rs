@@ -338,9 +338,8 @@ mod tests {
     #[test]
     fn test_capacity_decreases() {
         let mut acc = Accumulator::new(1024);
-        let first_cap;
         acc.add(&make_bipolar(1024, 0));
-        first_cap = acc.capacity(100);
+        let first_cap = acc.capacity(100);
 
         for i in 1..50 {
             acc.add(&make_bipolar(1024, i));

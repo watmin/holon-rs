@@ -1510,7 +1510,7 @@ mod tests {
 
     #[test]
     fn test_field_stripe_distribution() {
-        let mut counts = vec![0usize; 8];
+        let mut counts = [0usize; 8];
         for i in 0..100 {
             let path = format!("field_{}", i);
             counts[Encoder::field_stripe(&path, 8)] += 1;

@@ -143,6 +143,7 @@ impl OnlineSubspace {
     /// - `max_components`: ceiling — never grow above this K
     /// - `grow_threshold`: grow if last eigenvalue > this fraction of first (default 0.05)
     /// - `shrink_threshold`: shrink if last eigenvalue < this fraction of first (default 0.01)
+    #[allow(clippy::too_many_arguments)] // explicit-config constructor; builder would obscure call sites
     pub fn with_reflexive_params(
         dim: usize,
         k: usize,
@@ -1102,9 +1103,9 @@ mod tests {
             *rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let coeff = ((*rng_state >> 33) as f64) / (u32::MAX as f64) * 2.0 - 1.0;
             // Each basis direction hits a different slice of dimensions
-            for i in 0..dim {
+            for (i, slot) in result.iter_mut().enumerate() {
                 if i % rank == b {
-                    result[i] += coeff;
+                    *slot += coeff;
                 }
             }
         }
@@ -1138,9 +1139,9 @@ mod tests {
             // Random magnitude
             rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let mag = ((rng >> 33) as f64) / (u32::MAX as f64) * 2.0 - 1.0;
-            for i in 0..dim {
+            for (i, slot) in v.iter_mut().enumerate() {
                 if i % 16 == dir {
-                    v[i] = mag;
+                    *slot = mag;
                 }
             }
             sub.update(&v);
