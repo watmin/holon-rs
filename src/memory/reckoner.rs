@@ -460,8 +460,8 @@ impl Reckoner {
 
     /// Resolve a label handle to its `HolonAST`.
     ///
-    /// Use [`crate::canonical_edn_holon`] with your `AtomTypeRegistry` to get
-    /// a stable byte form for logging or hashing.
+    /// Use [`crate::canonical_edn_holon`] for a stable byte form for logging
+    /// or hashing.
     pub fn label_ast(&self, label: Label) -> Option<&HolonAST> {
         match &self.mode {
             ReckMode::Discrete { label_asts, .. } => label_asts.get(label.index()),
@@ -1092,7 +1092,7 @@ mod tests {
         // `label_ast(Label)`.
         let win = HolonAST::keyword("Win");
         let loss = HolonAST::keyword("Loss");
-        let composite = HolonAST::bind(HolonAST::keyword("side"), HolonAST::atom(1_i64));
+        let composite = HolonAST::bind(HolonAST::keyword("side"), HolonAST::i64(1));
 
         let r = Reckoner::new("multi-shape", 64, 10, ReckConfig::Discrete(vec![
             win.clone(), loss.clone(), composite.clone(),
@@ -1100,7 +1100,7 @@ mod tests {
 
         let labels = r.labels();
         assert_eq!(labels.len(), 3);
-        assert!(matches!(r.label_ast(labels[0]), Some(HolonAST::Atom(_))));
+        assert!(matches!(r.label_ast(labels[0]), Some(HolonAST::Symbol(_))));
         assert!(matches!(r.label_ast(labels[2]), Some(HolonAST::Bind(_, _))));
         // Out-of-range handle → None.
         assert!(r.label_ast(Label::from_index(99)).is_none());

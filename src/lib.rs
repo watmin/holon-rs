@@ -72,10 +72,10 @@ pub use kernel::{
 };
 pub use kernel::{ScalarRef, ScalarValue, TimeResolution, WalkType, Walkable, WalkableRef, WalkableValue};
 
-// 058 algebra surface — HolonAST, the 6-variant core AST, plus its
-// registry and encoding functions. Re-exported at the crate root so
-// downstream crates (wat-rs, trading lab) can `use holon::HolonAST`.
-pub use kernel::{atom_value, canonical_edn_holon, encode, AtomTypeRegistry, HolonAST};
+// HolonAST — 11-variant universal AST closed under itself per arc 057
+// (typed leaves; primitives ARE HolonAST). Re-exported at the crate root
+// so downstream crates (wat-rs, trading lab) can `use holon::HolonAST`.
+pub use kernel::{canonical_edn_holon, encode, HolonAST};
 pub use memory::{Engram, EngramLibrary, Label, LabelScore, OnlineSubspace, Prediction, ReckConfig, Reckoner};
 
 #[cfg(test)]

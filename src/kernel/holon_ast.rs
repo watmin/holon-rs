@@ -1,91 +1,111 @@
-//! HolonAST — the universal AST for the wat algebra's 6 core forms.
+//! HolonAST — the universal AST for the wat algebra. Closed under itself.
 //!
-//! Under 058 FOUNDATION's "Two Tiers of wat" split, HolonAST is the UpperCase
-//! tier — AST constructors that do not run. The vector projection materializes
-//! on demand via [`encode`].
+//! Per arc 057 (typed HolonAST leaves): primitives ARE HolonAST. The number
+//! 42 is the simplest possible AST — a leaf. So is `true`, so is `"foo"`,
+//! so is `:outcome`. They have well-defined canonical encodings; they are
+//! terms in the algebra; they are HolonAST.
 //!
-//! The 6 variants correspond to algebra core per FOUNDATION.md:
-//! `Atom`, `Bind`, `Bundle`, `Permute`, `Thermometer`, `Blend`.
+//! Eleven variants:
 //!
-//! # Parametric Atom
+//! - **Vocabulary leaves** (BOOK Ch.45): `Symbol`, `String`, `I64`, `F64`,
+//!   `Bool`. Irreducible content the encoder hashes to a deterministic
+//!   identity vector. These are the algebra's atoms in the Lisp `atom?`
+//!   predicate sense.
+//! - **Opaque-identity wrap** (BOOK Ch.54): `Atom(Arc<HolonAST>)`. Wraps a
+//!   composite Holon as an opaque-identity unit — the resulting vector
+//!   hashes the canonical-EDN bytes of the wrapped AST as a single seed
+//!   instead of recursively encoding sub-parts. The substrate's
+//!   programs-as-data path: `Atom(prog)` and direct `prog` produce
+//!   semantically distinct vectors (the first is opaque, the second is
+//!   structural). Collapsing them would lose a real algebraic operation.
+//! - **Composites**: `Bind`, `Bundle`, `Permute`, `Thermometer`, `Blend`.
+//!   Similarity-preserving recursive encoding. Sub-parts recoverable via
+//!   `unbind`.
 //!
-//! `Atom<T>` (058-001 ACCEPTED as parametric) stores any Rust type T. Rust-level
-//! storage is `Arc<dyn Any + Send + Sync>`; the wat type-checker guarantees the
-//! concrete T at every use site, so runtime downcasts never fail.
-//!
-//! Hash input is `(type_tag, canonical bytes of value)` via [`AtomTypeRegistry`].
-//! Different types with identical bytes produce different vectors —
-//! `Atom(42_i64)`, `Atom("42".to_string())`, `Atom(42.0_f64)`, `Atom(true)`
-//! are four distinct atoms.
-//!
-//! Programs-as-atoms: `Atom(some_holon_ast)` produces an opaque-identity vector
-//! whose hash is over the holon's canonical-EDN form. Two legitimate encodings
-//! for any composite Holon — direct (structural; children composed, sub-parts
-//! recoverable via unbind) or atomized wrap (opaque; EDN-hashed, structure not
-//! recoverable from the vector). Applications pick per use case (058-001).
-//!
-//! `:Any` is NOT a wat-level type. The grammar refuses it; the type checker
-//! refuses it. `dyn Any` is Rust substrate plumbing, never wat-visible.
-//!
-//! # Keywords
-//!
-//! Rust has no symbol type. Wat keywords (`:foo`, `:wat/std/cos-basis`) are
-//! represented as `String` values whose content begins with `:`. The leading
-//! `:` is part of the canonical bytes, so `HolonAST::keyword("foo")` and
-//! `HolonAST::atom("foo".to_string())` produce different vectors — the byte
-//! layouts differ. Use [`HolonAST::keyword`] to construct keyword atoms; the
-//! wat-vm parser will produce them from source like `:foo`. String atoms use
-//! [`HolonAST::atom`] with a `String` that does not begin with `:`.
+//! The algebra is closed: every term in `HolonAST` is itself `HolonAST`.
+//! `Hash + Eq` derive directly (manual impls only because f64 fields use
+//! `to_bits` per the standard NaN-Hash dance). Cache keys, engram
+//! libraries, persistence, and cross-process AST handoff all work because
+//! a HolonAST has structural identity.
 
-use super::atom_registry::AtomTypeRegistry;
 use super::primitives::Primitives;
 use super::scalar::{ScalarEncoder, ScalarMode};
 use super::vector::Vector;
 use super::vector_manager::VectorManager;
 use sha2::{Digest, Sha256};
-use std::any::Any;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-/// The universal AST for the 6 algebra core forms.
+/// The universal AST. Eleven variants. Closed under itself.
 ///
-/// `Clone` is derived — all variants are `Arc`-wrapped, so clone is
-/// O(1) refcount-increment regardless of tree depth.
+/// `Clone` is O(1) — every recursive payload is `Arc`-wrapped.
 #[derive(Clone)]
 pub enum HolonAST {
-    /// `Atom(T)` — parametric over any Rust type T. See module doc.
-    Atom(Arc<dyn Any + Send + Sync>),
+    // ─── Vocabulary leaves ──────────────────────────────────────────────
+    /// Keyword content (e.g. `:outcome`). Stored bytes include the leading
+    /// colon. Distinct from `String` at the type level (different leaf
+    /// variant); content-equivalent at the canonical-bytes level (both
+    /// hash through the `"String"` type tag — a `Symbol(":outcome")` and
+    /// a `String(":outcome")` produce identical seeds, but the lab's
+    /// keywords always carry the colon prefix and strings never do, so
+    /// content disambiguates in practice).
+    Symbol(Arc<str>),
 
+    /// String literal content. Stored bytes are exactly the string.
+    String(Arc<str>),
+
+    /// 64-bit signed integer leaf.
+    I64(i64),
+
+    /// 64-bit float leaf. Hash uses `to_bits` (NaN-safe per standard
+    /// HashMap-with-f64 dance).
+    F64(f64),
+
+    /// Boolean leaf.
+    Bool(bool),
+
+    // ─── Opaque-identity wrap ───────────────────────────────────────────
+    /// Wrap a HolonAST as an opaque-identity unit. The wrapped AST's
+    /// canonical bytes feed a single SHA-256; the resulting vector
+    /// represents "this program as one identity," distinct from the
+    /// structural vector of the unwrapped form.
+    ///
+    /// `Atom(Atom(x))` differs from `Atom(x)` differs from `x` —
+    /// quote-wrapping is repeatable and meaningful (Lisp's `'(quote x)`
+    /// ≠ `'x`).
+    Atom(Arc<HolonAST>),
+
+    // ─── Composites ─────────────────────────────────────────────────────
     /// `Bind(a, b)` — elementwise multiplication; MAP's "M".
     Bind(Arc<HolonAST>, Arc<HolonAST>),
 
     /// `Bundle(xs)` — elementwise sum + ternary threshold; MAP's "A".
-    /// Takes a list per 058-003.
     Bundle(Arc<Vec<HolonAST>>),
 
     /// `Permute(child, k)` — cyclic shift; MAP's "P".
-    /// `Permute(v, k)[i] = v[(i + k) mod d]` per CORE-AUDIT.
+    /// `Permute(v, k)[i] = v[(i + k) mod d]`.
     Permute(Arc<HolonAST>, i32),
 
-    /// `Thermometer(value, min, max)` — gradient encoding.
-    /// First `N = round(d · clamp((value-min)/(max-min), 0, 1))` dims are `+1`,
-    /// remaining `d - N` dims are `-1`. Canonical layout; bit-identical across
-    /// nodes at the same d. See CORE-AUDIT / 058-023.
+    /// `Thermometer(value, min, max)` — gradient encoding. First
+    /// `N = round(d · clamp((value-min)/(max-min), 0, 1))` dims are `+1`,
+    /// remaining `d - N` dims are `-1`.
     Thermometer { value: f64, min: f64, max: f64 },
 
-    /// `Blend(a, b, w1, w2)` — `threshold(w1·a + w2·b)`.
-    /// Option B per 058-002: two independent real-valued weights; negative allowed.
+    /// `Blend(a, b, w1, w2)` — `threshold(w1·a + w2·b)`. Two independent
+    /// real-valued weights; negative allowed (058-002 Option B).
     Blend(Arc<HolonAST>, Arc<HolonAST>, f64, f64),
 }
 
 impl fmt::Debug for HolonAST {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HolonAST::Atom(_) => {
-                // Payload type can't be named without a registry lookup — keep
-                // the variant identifiable without exposing the opaque payload.
-                write!(f, "Atom(<opaque>)")
-            }
+            HolonAST::Symbol(s) => f.debug_tuple("Symbol").field(&&**s).finish(),
+            HolonAST::String(s) => f.debug_tuple("String").field(&&**s).finish(),
+            HolonAST::I64(n) => f.debug_tuple("I64").field(n).finish(),
+            HolonAST::F64(x) => f.debug_tuple("F64").field(x).finish(),
+            HolonAST::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
+            HolonAST::Atom(h) => f.debug_tuple("Atom").field(h).finish(),
             HolonAST::Bind(a, b) => f.debug_tuple("Bind").field(a).field(b).finish(),
             HolonAST::Bundle(children) => f.debug_tuple("Bundle").field(children).finish(),
             HolonAST::Permute(child, k) => {
@@ -108,47 +128,121 @@ impl fmt::Debug for HolonAST {
     }
 }
 
+impl PartialEq for HolonAST {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (HolonAST::Symbol(a), HolonAST::Symbol(b)) => a == b,
+            (HolonAST::String(a), HolonAST::String(b)) => a == b,
+            (HolonAST::I64(a), HolonAST::I64(b)) => a == b,
+            (HolonAST::F64(a), HolonAST::F64(b)) => a.to_bits() == b.to_bits(),
+            (HolonAST::Bool(a), HolonAST::Bool(b)) => a == b,
+            (HolonAST::Atom(a), HolonAST::Atom(b)) => a == b,
+            (HolonAST::Bind(a1, b1), HolonAST::Bind(a2, b2)) => a1 == a2 && b1 == b2,
+            (HolonAST::Bundle(xs), HolonAST::Bundle(ys)) => xs == ys,
+            (HolonAST::Permute(a, k1), HolonAST::Permute(b, k2)) => a == b && k1 == k2,
+            (
+                HolonAST::Thermometer {
+                    value: v1,
+                    min: m1,
+                    max: x1,
+                },
+                HolonAST::Thermometer {
+                    value: v2,
+                    min: m2,
+                    max: x2,
+                },
+            ) => v1.to_bits() == v2.to_bits() && m1.to_bits() == m2.to_bits() && x1.to_bits() == x2.to_bits(),
+            (HolonAST::Blend(a1, b1, w1a, w2a), HolonAST::Blend(a2, b2, w1b, w2b)) => {
+                a1 == a2 && b1 == b2 && w1a.to_bits() == w1b.to_bits() && w2a.to_bits() == w2b.to_bits()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for HolonAST {}
+
+impl Hash for HolonAST {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            HolonAST::Symbol(s) => s.hash(state),
+            HolonAST::String(s) => s.hash(state),
+            HolonAST::I64(n) => n.hash(state),
+            HolonAST::F64(x) => x.to_bits().hash(state),
+            HolonAST::Bool(b) => b.hash(state),
+            HolonAST::Atom(h) => h.hash(state),
+            HolonAST::Bind(a, b) => {
+                a.hash(state);
+                b.hash(state);
+            }
+            HolonAST::Bundle(xs) => xs.hash(state),
+            HolonAST::Permute(a, k) => {
+                a.hash(state);
+                k.hash(state);
+            }
+            HolonAST::Thermometer { value, min, max } => {
+                value.to_bits().hash(state);
+                min.to_bits().hash(state);
+                max.to_bits().hash(state);
+            }
+            HolonAST::Blend(a, b, w1, w2) => {
+                a.hash(state);
+                b.hash(state);
+                w1.to_bits().hash(state);
+                w2.to_bits().hash(state);
+            }
+        }
+    }
+}
+
 impl HolonAST {
-    /// Construct an Atom from any Rust type that is `Any + Send + Sync`.
-    ///
-    /// Canonicalization during encoding dispatches on the registry. Using a
-    /// type that isn't registered panics at encode time with a clear message.
-    pub fn atom<T: Any + Send + Sync + 'static>(value: T) -> Self {
-        HolonAST::Atom(Arc::new(value))
+    /// Construct a `Symbol` leaf from raw content. The caller is
+    /// responsible for the `:`-prefix convention; use [`HolonAST::keyword`]
+    /// for normalized keyword construction.
+    pub fn symbol(content: impl Into<Arc<str>>) -> Self {
+        HolonAST::Symbol(content.into())
     }
 
-    /// Construct an Atom wrapping a wat keyword.
-    ///
-    /// Rust has no symbol type; wat keywords are represented at the Rust
-    /// level as `String` values whose content begins with `:`. The leading
-    /// `:` is part of the stored bytes and the hash input, so
-    /// `HolonAST::keyword("foo")` (stored as `":foo"`) produces a different
-    /// vector from `HolonAST::atom("foo".to_string())` (stored as `"foo"`).
-    ///
-    /// The input may or may not already carry the leading `:`:
-    ///
-    /// ```
-    /// use holon::HolonAST;
-    /// // All three create the same keyword atom — leading colon enforced:
-    /// let k1 = HolonAST::keyword("foo/bar");
-    /// let k2 = HolonAST::keyword(":foo/bar");
-    /// // k1 and k2 hold identical String payloads ":foo/bar".
-    /// ```
-    ///
-    /// This is the storage convention the wat-vm parser will produce: source
-    /// `:foo/bar` → `HolonAST::keyword("foo/bar")`; source `"foo/bar"` →
-    /// `HolonAST::atom("foo/bar".to_string())`. Different content → different
-    /// canonical bytes → different vectors, no collision.
+    /// Construct a `String` leaf.
+    pub fn string(content: impl Into<Arc<str>>) -> Self {
+        HolonAST::String(content.into())
+    }
+
+    /// Construct an `I64` leaf.
+    pub fn i64(n: i64) -> Self {
+        HolonAST::I64(n)
+    }
+
+    /// Construct an `F64` leaf.
+    pub fn f64(x: f64) -> Self {
+        HolonAST::F64(x)
+    }
+
+    /// Construct a `Bool` leaf.
+    pub fn bool_(b: bool) -> Self {
+        HolonAST::Bool(b)
+    }
+
+    /// Construct a keyword `Symbol` leaf with the leading colon
+    /// normalized. `HolonAST::keyword("foo")` and `HolonAST::keyword(":foo")`
+    /// produce the same atom.
     pub fn keyword(name: &str) -> Self {
-        let stored = if name.starts_with(':') {
-            name.to_string()
+        let stored: Arc<str> = if name.starts_with(':') {
+            Arc::from(name)
         } else {
             let mut s = String::with_capacity(name.len() + 1);
             s.push(':');
             s.push_str(name);
-            s
+            Arc::from(s)
         };
-        HolonAST::atom(stored)
+        HolonAST::Symbol(stored)
+    }
+
+    /// Wrap a HolonAST as an opaque-identity Atom. See the [`HolonAST::Atom`]
+    /// variant docs for the algebraic significance of the wrap.
+    pub fn atom(h: HolonAST) -> Self {
+        HolonAST::Atom(Arc::new(h))
     }
 
     /// Construct a Bind node.
@@ -175,6 +269,56 @@ impl HolonAST {
     pub fn blend(a: HolonAST, b: HolonAST, w1: f64, w2: f64) -> Self {
         HolonAST::Blend(Arc::new(a), Arc::new(b), w1, w2)
     }
+
+    // ─── Per-variant accessors (Option<T>) ──────────────────────────────
+
+    /// If this is a `Symbol` leaf, return the content.
+    pub fn as_symbol(&self) -> Option<&str> {
+        match self {
+            HolonAST::Symbol(s) => Some(s.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// If this is a `String` leaf, return the content.
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            HolonAST::String(s) => Some(s.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// If this is an `I64` leaf, return the value.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            HolonAST::I64(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// If this is an `F64` leaf, return the value.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            HolonAST::F64(x) => Some(*x),
+            _ => None,
+        }
+    }
+
+    /// If this is a `Bool` leaf, return the value.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            HolonAST::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// If this is an `Atom`, return the wrapped HolonAST.
+    pub fn atom_inner(&self) -> Option<&HolonAST> {
+        match self {
+            HolonAST::Atom(h) => Some(h.as_ref()),
+            _ => None,
+        }
+    }
 }
 
 // Variant tags for canonical-EDN serialization. Distinct bytes per variant so
@@ -186,34 +330,52 @@ const TAG_PERMUTE: u8 = 0x04;
 const TAG_THERMOMETER: u8 = 0x05;
 const TAG_BLEND: u8 = 0x06;
 
+// Type tags for primitive leaves. Byte-equivalent with the legacy
+// `Atom(Arc<dyn Any>)` registry encoding for the corresponding payload
+// type — a `Symbol(":foo")` produces the same canonical bytes today's
+// `Atom(":foo".to_string())` did. Preserves proof 002 vector identity
+// for primitive-atom call sites; the only encoding shifts come from
+// previously-WatAST-payload paths (e.g. `(:wat::holon::Atom (:wat::core::quote
+// :foo))`) where the surface now lowers to a `Symbol` leaf instead.
+const PRIM_TAG_STRING: &str = "String";
+const PRIM_TAG_I64: &str = "i64";
+const PRIM_TAG_F64: &str = "f64";
+const PRIM_TAG_BOOL: &str = "bool";
+const ATOM_INNER_TAG: &str = "wat/algebra/Holon";
+
+fn write_atom_payload(out: &mut Vec<u8>, type_tag: &str, payload: &[u8]) {
+    out.push(TAG_ATOM);
+    out.extend_from_slice(&(type_tag.len() as u32).to_le_bytes());
+    out.extend_from_slice(type_tag.as_bytes());
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+}
+
 /// Canonical-EDN bytes for a HolonAST.
 ///
-/// Deterministic across all constructions of the same AST shape — same
-/// children, same weights, same atom payloads all produce the same bytes.
-/// Two different ASTs produce different bytes.
-///
-/// This is the hash input for `Atom(Arc<HolonAST>)` — programs-as-atoms. It
-/// is also the substrate for cryptographic-provenance hashing per FOUNDATION's
-/// "The Algebra Is Immutable" section (EDN is the transport form; the hash IS
-/// the holon's identity).
-pub fn canonical_edn_holon(ast: &HolonAST, registry: &AtomTypeRegistry) -> Vec<u8> {
+/// Deterministic across all constructions of the same AST shape. Two
+/// different ASTs produce different bytes. Same input → same bytes →
+/// same vector seed.
+pub fn canonical_edn_holon(ast: &HolonAST) -> Vec<u8> {
     let mut out = Vec::new();
     match ast {
-        HolonAST::Atom(payload) => {
-            out.push(TAG_ATOM);
-            let tag = registry.type_tag(payload.as_ref());
-            // Length-prefixed tag so a tag name can contain the null byte
-            // without breaking parsing (defensive; tags in practice are ASCII).
-            out.extend_from_slice(&(tag.len() as u32).to_le_bytes());
-            out.extend_from_slice(tag.as_bytes());
-            let bytes = registry.canonical_bytes(payload.as_ref());
-            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-            out.extend_from_slice(&bytes);
+        // Primitive leaves use the same `[TAG_ATOM, type_tag, payload]`
+        // shape the legacy `Atom(Arc<dyn Any>)` did, so vectors match
+        // byte-for-byte where the legacy surface produced an Atom of
+        // the corresponding payload.
+        HolonAST::Symbol(s) => write_atom_payload(&mut out, PRIM_TAG_STRING, s.as_bytes()),
+        HolonAST::String(s) => write_atom_payload(&mut out, PRIM_TAG_STRING, s.as_bytes()),
+        HolonAST::I64(n) => write_atom_payload(&mut out, PRIM_TAG_I64, &n.to_le_bytes()),
+        HolonAST::F64(x) => write_atom_payload(&mut out, PRIM_TAG_F64, &x.to_le_bytes()),
+        HolonAST::Bool(b) => write_atom_payload(&mut out, PRIM_TAG_BOOL, &[*b as u8]),
+        HolonAST::Atom(inner) => {
+            let inner_bytes = canonical_edn_holon(inner);
+            write_atom_payload(&mut out, ATOM_INNER_TAG, &inner_bytes);
         }
         HolonAST::Bind(a, b) => {
             out.push(TAG_BIND);
-            let a_bytes = canonical_edn_holon(a, registry);
-            let b_bytes = canonical_edn_holon(b, registry);
+            let a_bytes = canonical_edn_holon(a);
+            let b_bytes = canonical_edn_holon(b);
             out.extend_from_slice(&(a_bytes.len() as u32).to_le_bytes());
             out.extend_from_slice(&a_bytes);
             out.extend_from_slice(&(b_bytes.len() as u32).to_le_bytes());
@@ -223,14 +385,14 @@ pub fn canonical_edn_holon(ast: &HolonAST, registry: &AtomTypeRegistry) -> Vec<u
             out.push(TAG_BUNDLE);
             out.extend_from_slice(&(children.len() as u32).to_le_bytes());
             for c in children.iter() {
-                let c_bytes = canonical_edn_holon(c, registry);
+                let c_bytes = canonical_edn_holon(c);
                 out.extend_from_slice(&(c_bytes.len() as u32).to_le_bytes());
                 out.extend_from_slice(&c_bytes);
             }
         }
         HolonAST::Permute(child, k) => {
             out.push(TAG_PERMUTE);
-            let c_bytes = canonical_edn_holon(child, registry);
+            let c_bytes = canonical_edn_holon(child);
             out.extend_from_slice(&(c_bytes.len() as u32).to_le_bytes());
             out.extend_from_slice(&c_bytes);
             out.extend_from_slice(&k.to_le_bytes());
@@ -243,8 +405,8 @@ pub fn canonical_edn_holon(ast: &HolonAST, registry: &AtomTypeRegistry) -> Vec<u
         }
         HolonAST::Blend(a, b, w1, w2) => {
             out.push(TAG_BLEND);
-            let a_bytes = canonical_edn_holon(a, registry);
-            let b_bytes = canonical_edn_holon(b, registry);
+            let a_bytes = canonical_edn_holon(a);
+            let b_bytes = canonical_edn_holon(b);
             out.extend_from_slice(&(a_bytes.len() as u32).to_le_bytes());
             out.extend_from_slice(&a_bytes);
             out.extend_from_slice(&(b_bytes.len() as u32).to_le_bytes());
@@ -256,60 +418,67 @@ pub fn canonical_edn_holon(ast: &HolonAST, registry: &AtomTypeRegistry) -> Vec<u
     out
 }
 
-/// Hash an Atom's payload to a seed for vector generation.
-///
-/// Seed input: `(type_tag, canonical bytes, global seed)`. Different types
-/// with identical bytes produce different seeds.
-fn atom_seed(
-    value: &(dyn Any + Send + Sync),
-    registry: &AtomTypeRegistry,
-    global_seed: u64,
-) -> u64 {
-    let tag = registry.type_tag(value);
-    let bytes = registry.canonical_bytes(value);
-
+/// Hash a leaf's canonical bytes to a vector seed.
+fn leaf_seed(type_tag: &str, payload: &[u8], global_seed: u64) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update(global_seed.to_le_bytes());
-    hasher.update(tag.as_bytes());
-    hasher.update((bytes.len() as u32).to_le_bytes());
-    hasher.update(&bytes);
+    hasher.update(type_tag.as_bytes());
+    hasher.update((payload.len() as u32).to_le_bytes());
+    hasher.update(payload);
     let hash = hasher.finalize();
-
     u64::from_le_bytes(hash[0..8].try_into().unwrap())
 }
 
 /// Realize a HolonAST into a Vector by walking the AST and dispatching to
 /// the lowercase Rust primitives.
-///
-/// Encoding is deterministic: same AST ⇒ same vector. No caching in this slice
-/// (L1/L2 cache lands later per FOUNDATION's "Caching Is Memoization" section).
-pub fn encode(
-    ast: &HolonAST,
-    vm: &VectorManager,
-    scalar: &ScalarEncoder,
-    registry: &AtomTypeRegistry,
-) -> Vector {
+pub fn encode(ast: &HolonAST, vm: &VectorManager, scalar: &ScalarEncoder) -> Vector {
     match ast {
-        HolonAST::Atom(payload) => {
-            let seed = atom_seed(payload.as_ref(), registry, vm.global_seed());
-            let dims = vm.dimensions();
-            deterministic_vector_from_seed(seed, dims)
+        HolonAST::Symbol(s) => {
+            let seed = leaf_seed(PRIM_TAG_STRING, s.as_bytes(), vm.global_seed());
+            deterministic_vector_from_seed(seed, vm.dimensions())
+        }
+        HolonAST::String(s) => {
+            let seed = leaf_seed(PRIM_TAG_STRING, s.as_bytes(), vm.global_seed());
+            deterministic_vector_from_seed(seed, vm.dimensions())
+        }
+        HolonAST::I64(n) => {
+            let seed = leaf_seed(PRIM_TAG_I64, &n.to_le_bytes(), vm.global_seed());
+            deterministic_vector_from_seed(seed, vm.dimensions())
+        }
+        HolonAST::F64(x) => {
+            let seed = leaf_seed(PRIM_TAG_F64, &x.to_le_bytes(), vm.global_seed());
+            deterministic_vector_from_seed(seed, vm.dimensions())
+        }
+        HolonAST::Bool(b) => {
+            let seed = leaf_seed(PRIM_TAG_BOOL, &[*b as u8], vm.global_seed());
+            deterministic_vector_from_seed(seed, vm.dimensions())
+        }
+        HolonAST::Atom(inner) => {
+            let inner_bytes = canonical_edn_holon(inner);
+            let seed = leaf_seed(ATOM_INNER_TAG, &inner_bytes, vm.global_seed());
+            deterministic_vector_from_seed(seed, vm.dimensions())
         }
         HolonAST::Bind(a, b) => {
-            let va = encode(a, vm, scalar, registry);
-            let vb = encode(b, vm, scalar, registry);
+            let va = encode(a, vm, scalar);
+            let vb = encode(b, vm, scalar);
             Primitives::bind(&va, &vb)
         }
         HolonAST::Bundle(children) => {
-            let vectors: Vec<Vector> = children
-                .iter()
-                .map(|c| encode(c, vm, scalar, registry))
-                .collect();
-            let refs: Vec<&Vector> = vectors.iter().collect();
-            Primitives::bundle(&refs)
+            // Empty Bundle = the algebra's identity element (no
+            // information). Materializes as a zero ternary vector so
+            // structurally-lowered wat forms containing `()` survive
+            // encoding without panicking.
+            if children.is_empty() {
+                Vector::zeros(vm.dimensions())
+            } else {
+                let vectors: Vec<Vector> =
+                    children.iter().map(|c| encode(c, vm, scalar)).collect();
+                let refs: Vec<&Vector> = vectors.iter().collect();
+                Primitives::bundle(&refs)
+            }
         }
         HolonAST::Permute(child, k) => {
-            let vc = encode(child, vm, scalar, registry);
+            let vc = encode(child, vm, scalar);
             Primitives::permute(&vc, *k)
         }
         HolonAST::Thermometer { value, min, max } => scalar.encode(
@@ -320,29 +489,14 @@ pub fn encode(
             },
         ),
         HolonAST::Blend(a, b, w1, w2) => {
-            let va = encode(a, vm, scalar, registry);
-            let vb = encode(b, vm, scalar, registry);
+            let va = encode(a, vm, scalar);
+            let vb = encode(b, vm, scalar);
             Primitives::blend_weighted(&va, &vb, *w1, *w2)
         }
     }
 }
 
-/// Recover the inner T from an Atom node.
-///
-/// Returns `Some(&T)` if the atom's payload is of type T; `None` otherwise.
-/// The wat type-checker guarantees T at every call site in well-typed programs,
-/// so `None` indicates a bug or a non-Atom variant.
-pub fn atom_value<T: Any + Send + Sync + 'static>(ast: &HolonAST) -> Option<&T> {
-    match ast {
-        HolonAST::Atom(payload) => payload.downcast_ref::<T>(),
-        _ => None,
-    }
-}
-
 /// Generate a deterministic ternary vector from a u64 seed.
-///
-/// Produces values in `{-1, 0, +1}^d` with uniform 1/3 probability each,
-/// matching the distribution used by `VectorManager::compute_vector`.
 fn deterministic_vector_from_seed(seed: u64, dims: usize) -> Vector {
     use rand::{RngCore, SeedableRng};
     use rand_chacha::ChaCha8Rng;
@@ -365,345 +519,317 @@ fn deterministic_vector_from_seed(seed: u64, dims: usize) -> Vector {
 mod tests {
     use super::*;
     use crate::kernel::Similarity;
+    use std::collections::HashMap;
 
     const D: usize = 1024;
 
-    fn fresh_env() -> (VectorManager, ScalarEncoder, AtomTypeRegistry) {
+    fn fresh_env() -> (VectorManager, ScalarEncoder) {
         (
             VectorManager::with_seed(D, 42),
             ScalarEncoder::with_seed(D, 42),
-            AtomTypeRegistry::with_builtins(),
         )
     }
 
     #[test]
-    fn atom_type_discrimination_int_vs_string() {
-        let (vm, se, reg) = fresh_env();
-        let v_int = encode(&HolonAST::atom(42_i64), &vm, &se, &reg);
-        let v_str = encode(&HolonAST::atom("42".to_string()), &vm, &se, &reg);
-        assert_ne!(v_int, v_str, "Atom(42_i64) must differ from Atom(\"42\")");
+    fn leaf_int_vs_string_distinct() {
+        let (vm, se) = fresh_env();
+        let v_int = encode(&HolonAST::i64(42), &vm, &se);
+        let v_str = encode(&HolonAST::string("42"), &vm, &se);
+        assert_ne!(v_int, v_str);
     }
 
     #[test]
-    fn atom_type_discrimination_int_vs_float() {
-        let (vm, se, reg) = fresh_env();
-        let v_int = encode(&HolonAST::atom(42_i64), &vm, &se, &reg);
-        let v_float = encode(&HolonAST::atom(42.0_f64), &vm, &se, &reg);
+    fn leaf_int_vs_float_distinct() {
+        let (vm, se) = fresh_env();
+        let v_int = encode(&HolonAST::i64(42), &vm, &se);
+        let v_float = encode(&HolonAST::f64(42.0), &vm, &se);
         assert_ne!(v_int, v_float);
     }
 
     #[test]
-    fn atom_type_discrimination_int_widths() {
-        // i32 and i64 with the same numeric value produce different vectors.
-        let (vm, se, reg) = fresh_env();
-        let v_i32 = encode(&HolonAST::atom(42_i32), &vm, &se, &reg);
-        let v_i64 = encode(&HolonAST::atom(42_i64), &vm, &se, &reg);
-        assert_ne!(v_i32, v_i64);
-    }
-
-    #[test]
-    fn keyword_vs_string_discrimination() {
-        // Wat keywords are stored as Strings with leading `:`; wat strings are
-        // Strings without. Content differs → hash differs → vectors differ.
-        let (vm, se, reg) = fresh_env();
-        let v_kw = encode(&HolonAST::keyword("foo/bar"), &vm, &se, &reg);
-        let v_str = encode(&HolonAST::atom("foo/bar".to_string()), &vm, &se, &reg);
-        assert_ne!(
-            v_kw, v_str,
-            "Keyword :foo/bar must differ from string \"foo/bar\" — \
-             the leading `:` is part of the stored bytes"
-        );
+    fn keyword_vs_string_distinct_by_content() {
+        // Keyword stored content begins with `:`; string doesn't.
+        // Symbol and String share a canonical type tag, so different
+        // leaves with identical content WOULD collide — but the lab's
+        // convention puts a colon on every keyword and never on a
+        // string, so content disambiguates.
+        let (vm, se) = fresh_env();
+        let v_kw = encode(&HolonAST::keyword("foo/bar"), &vm, &se);
+        let v_str = encode(&HolonAST::string("foo/bar"), &vm, &se);
+        assert_ne!(v_kw, v_str);
     }
 
     #[test]
     fn keyword_normalization() {
-        // HolonAST::keyword accepts the name with or without the leading `:`
-        // and always stores with the colon. Both spellings produce the same atom.
-        let (vm, se, reg) = fresh_env();
-        let v_no_colon = encode(&HolonAST::keyword("foo"), &vm, &se, &reg);
-        let v_with_colon = encode(&HolonAST::keyword(":foo"), &vm, &se, &reg);
-        assert_eq!(
-            v_no_colon, v_with_colon,
-            "HolonAST::keyword must normalize the leading colon"
-        );
+        // HolonAST::keyword normalizes the leading colon either way.
+        let (vm, se) = fresh_env();
+        let v_no_colon = encode(&HolonAST::keyword("foo"), &vm, &se);
+        let v_with_colon = encode(&HolonAST::keyword(":foo"), &vm, &se);
+        assert_eq!(v_no_colon, v_with_colon);
     }
 
     #[test]
-    fn keyword_vs_prefixed_string() {
-        // Atom(":foo".to_string()) and HolonAST::keyword("foo") both store
-        // ":foo" as a String — they are the same atom, same vector. This is
-        // the parser's contract: wat source `:foo` produces the colon-prefixed
-        // String regardless of which helper constructs it.
-        let (vm, se, reg) = fresh_env();
-        let v_kw = encode(&HolonAST::keyword("foo"), &vm, &se, &reg);
-        let v_direct = encode(&HolonAST::atom(":foo".to_string()), &vm, &se, &reg);
+    fn keyword_vs_prefixed_string_at_symbol_layer() {
+        // HolonAST::keyword("foo") produces Symbol(":foo").
+        // HolonAST::symbol(":foo") produces the same canonical bytes
+        // (Symbol shares the "String" type tag with String). Both
+        // produce the same vector.
+        let (vm, se) = fresh_env();
+        let v_kw = encode(&HolonAST::keyword("foo"), &vm, &se);
+        let v_direct = encode(&HolonAST::symbol(":foo"), &vm, &se);
         assert_eq!(v_kw, v_direct);
     }
 
     #[test]
-    fn atom_type_discrimination_bool_vs_int() {
-        let (vm, se, reg) = fresh_env();
-        let v_bool = encode(&HolonAST::atom(true), &vm, &se, &reg);
-        let v_int = encode(&HolonAST::atom(1_i64), &vm, &se, &reg);
+    fn leaf_bool_vs_int_distinct() {
+        let (vm, se) = fresh_env();
+        let v_bool = encode(&HolonAST::bool_(true), &vm, &se);
+        let v_int = encode(&HolonAST::i64(1), &vm, &se);
         assert_ne!(v_bool, v_int);
     }
 
     #[test]
-    fn atom_deterministic() {
-        let (vm1, se1, reg1) = fresh_env();
-        let (vm2, se2, reg2) = fresh_env();
-        let v1 = encode(&HolonAST::atom("hello".to_string()), &vm1, &se1, &reg1);
-        let v2 = encode(&HolonAST::atom("hello".to_string()), &vm2, &se2, &reg2);
+    fn leaf_deterministic() {
+        let (vm1, se1) = fresh_env();
+        let (vm2, se2) = fresh_env();
+        let v1 = encode(&HolonAST::string("hello"), &vm1, &se1);
+        let v2 = encode(&HolonAST::string("hello"), &vm2, &se2);
         assert_eq!(v1, v2);
     }
 
     #[test]
-    fn atom_value_recovery() {
-        let node = HolonAST::atom(42_i64);
-        let recovered: Option<&i64> = atom_value(&node);
-        assert_eq!(recovered, Some(&42_i64));
+    fn per_variant_accessors_recover_payloads() {
+        assert_eq!(HolonAST::i64(42).as_i64(), Some(42));
+        assert_eq!(HolonAST::f64(3.14).as_f64(), Some(3.14));
+        assert_eq!(HolonAST::bool_(true).as_bool(), Some(true));
+        assert_eq!(HolonAST::string("foo").as_string(), Some("foo"));
+        assert_eq!(HolonAST::keyword("k").as_symbol(), Some(":k"));
     }
 
     #[test]
-    fn atom_value_wrong_type_none() {
-        let node = HolonAST::atom(42_i64);
-        let wrong: Option<&String> = atom_value(&node);
-        assert!(wrong.is_none());
+    fn per_variant_accessors_reject_wrong_variant() {
+        let n = HolonAST::i64(42);
+        assert!(n.as_string().is_none());
+        assert!(n.as_bool().is_none());
+        assert!(n.atom_inner().is_none());
+
+        let bound = HolonAST::bind(HolonAST::i64(1), HolonAST::i64(2));
+        assert!(bound.as_i64().is_none());
+        assert!(bound.atom_inner().is_none());
     }
 
     #[test]
-    fn atom_value_non_atom_none() {
-        let a = HolonAST::atom(1_i64);
-        let b = HolonAST::atom(2_i64);
-        let bound = HolonAST::bind(a, b);
-        let v: Option<&i64> = atom_value(&bound);
-        assert!(v.is_none());
+    fn atom_inner_recovers_wrapped_holon() {
+        let inner = HolonAST::bundle(vec![HolonAST::i64(1), HolonAST::i64(2)]);
+        let wrapped = HolonAST::atom(inner.clone());
+        assert_eq!(wrapped.atom_inner(), Some(&inner));
     }
 
     #[test]
     fn bind_composes_atoms() {
-        let (vm, se, reg) = fresh_env();
-        let a = HolonAST::atom("role".to_string());
-        let b = HolonAST::atom("filler".to_string());
-        let v_bound = encode(&HolonAST::bind(a, b), &vm, &se, &reg);
+        let (vm, se) = fresh_env();
+        let v_bound = encode(
+            &HolonAST::bind(HolonAST::string("role"), HolonAST::string("filler")),
+            &vm,
+            &se,
+        );
         assert_eq!(v_bound.dimensions(), D);
     }
 
     #[test]
     fn bundle_list_form() {
-        let (vm, se, reg) = fresh_env();
-        let children = vec![
-            HolonAST::atom("a".to_string()),
-            HolonAST::atom("b".to_string()),
-            HolonAST::atom("c".to_string()),
-        ];
-        let v = encode(&HolonAST::bundle(children), &vm, &se, &reg);
+        let (vm, se) = fresh_env();
+        let v = encode(
+            &HolonAST::bundle(vec![
+                HolonAST::string("a"),
+                HolonAST::string("b"),
+                HolonAST::string("c"),
+            ]),
+            &vm,
+            &se,
+        );
         assert_eq!(v.dimensions(), D);
     }
 
     #[test]
     fn permute_by_zero_is_identity() {
-        let (vm, se, reg) = fresh_env();
-        let a = HolonAST::atom("x".to_string());
-        let v_original = encode(&a, &vm, &se, &reg);
-        let v_permuted = encode(&HolonAST::permute(a, 0), &vm, &se, &reg);
+        let (vm, se) = fresh_env();
+        let a = HolonAST::string("x");
+        let v_original = encode(&a, &vm, &se);
+        let v_permuted = encode(&HolonAST::permute(a, 0), &vm, &se);
         assert_eq!(v_original, v_permuted);
     }
 
     #[test]
     fn permute_is_invertible() {
-        let (vm, se, reg) = fresh_env();
-        let a = HolonAST::atom("x".to_string());
-        let forward = HolonAST::permute(HolonAST::atom("x".to_string()), 7);
+        let (vm, se) = fresh_env();
+        let a = HolonAST::string("x");
+        let forward = HolonAST::permute(HolonAST::string("x"), 7);
         let round_trip = HolonAST::permute(forward, -7);
-        let v_original = encode(&a, &vm, &se, &reg);
-        let v_round_trip = encode(&round_trip, &vm, &se, &reg);
+        let v_original = encode(&a, &vm, &se);
+        let v_round_trip = encode(&round_trip, &vm, &se);
         assert_eq!(v_original, v_round_trip);
     }
 
     #[test]
     fn thermometer_endpoints() {
-        let (vm, se, reg) = fresh_env();
-        let v_min = encode(&HolonAST::thermometer(0.0, 0.0, 100.0), &vm, &se, &reg);
-        let v_max = encode(&HolonAST::thermometer(100.0, 0.0, 100.0), &vm, &se, &reg);
+        let (vm, se) = fresh_env();
+        let v_min = encode(&HolonAST::thermometer(0.0, 0.0, 100.0), &vm, &se);
+        let v_max = encode(&HolonAST::thermometer(100.0, 0.0, 100.0), &vm, &se);
         let sim = Similarity::cosine(&v_min, &v_max);
         assert!(sim < -0.99, "cosine ≈ -1 expected, got {}", sim);
     }
 
     #[test]
     fn blend_option_b_subtract() {
-        let (vm, se, reg) = fresh_env();
-        let x = HolonAST::atom("x".to_string());
-        let y = HolonAST::atom("y".to_string());
-        let v_sub = encode(&HolonAST::blend(x, y, 1.0, -1.0), &vm, &se, &reg);
+        let (vm, se) = fresh_env();
+        let v_sub = encode(
+            &HolonAST::blend(
+                HolonAST::string("x"),
+                HolonAST::string("y"),
+                1.0,
+                -1.0,
+            ),
+            &vm,
+            &se,
+        );
         assert_eq!(v_sub.dimensions(), D);
     }
 
     #[test]
     fn blend_option_b_circular_weights() {
-        let (vm, se, reg) = fresh_env();
-        let cos_basis = HolonAST::atom("wat/std/circular-cos-basis".to_string());
-        let sin_basis = HolonAST::atom("wat/std/circular-sin-basis".to_string());
+        let (vm, se) = fresh_env();
+        let cos_basis = HolonAST::string("wat/std/circular-cos-basis");
+        let sin_basis = HolonAST::string("wat/std/circular-sin-basis");
         let theta = std::f64::consts::FRAC_PI_4;
         let v = encode(
             &HolonAST::blend(cos_basis, sin_basis, theta.cos(), theta.sin()),
             &vm,
             &se,
-            &reg,
         );
         assert_eq!(v.dimensions(), D);
     }
 
-    // ─── Programs-as-atoms tests — the substrate commit of 058-001 ──────────
+    // ─── Programs-as-atoms tests — Atom(Arc<HolonAST>) opaque-identity ─
 
     #[test]
     fn atom_holon_encodes() {
-        // Atom wrapping a HolonAST encodes without panic.
-        let (vm, se, reg) = fresh_env();
-        let inner = HolonAST::bundle(vec![
-            HolonAST::atom("a".to_string()),
-            HolonAST::atom("b".to_string()),
-        ]);
-        let atomized = HolonAST::atom(inner);
-        let v = encode(&atomized, &vm, &se, &reg);
+        let (vm, se) = fresh_env();
+        let inner = HolonAST::bundle(vec![HolonAST::string("a"), HolonAST::string("b")]);
+        let v = encode(&HolonAST::atom(inner), &vm, &se);
         assert_eq!(v.dimensions(), D);
     }
 
     #[test]
     fn atom_holon_identical_programs_same_vector() {
-        // Two Atoms wrapping structurally-identical Holons produce identical vectors.
-        let (vm, se, reg) = fresh_env();
+        let (vm, se) = fresh_env();
         let make = || {
-            HolonAST::bundle(vec![
-                HolonAST::atom(42_i64),
-                HolonAST::atom("rsi".to_string()),
-            ])
+            HolonAST::bundle(vec![HolonAST::i64(42), HolonAST::string("rsi")])
         };
-        let v1 = encode(&HolonAST::atom(make()), &vm, &se, &reg);
-        let v2 = encode(&HolonAST::atom(make()), &vm, &se, &reg);
+        let v1 = encode(&HolonAST::atom(make()), &vm, &se);
+        let v2 = encode(&HolonAST::atom(make()), &vm, &se);
         assert_eq!(v1, v2);
     }
 
     #[test]
     fn atom_holon_different_programs_different_vectors() {
-        // Two Atoms wrapping structurally-different Holons produce different vectors.
-        let (vm, se, reg) = fresh_env();
-        let prog_a = HolonAST::bundle(vec![
-            HolonAST::atom(42_i64),
-            HolonAST::atom("rsi".to_string()),
-        ]);
-        let prog_b = HolonAST::bundle(vec![
-            HolonAST::atom(43_i64),
-            HolonAST::atom("rsi".to_string()),
-        ]);
-        let v_a = encode(&HolonAST::atom(prog_a), &vm, &se, &reg);
-        let v_b = encode(&HolonAST::atom(prog_b), &vm, &se, &reg);
+        let (vm, se) = fresh_env();
+        let prog_a = HolonAST::bundle(vec![HolonAST::i64(42), HolonAST::string("rsi")]);
+        let prog_b = HolonAST::bundle(vec![HolonAST::i64(43), HolonAST::string("rsi")]);
+        let v_a = encode(&HolonAST::atom(prog_a), &vm, &se);
+        let v_b = encode(&HolonAST::atom(prog_b), &vm, &se);
         assert_ne!(v_a, v_b);
     }
 
     #[test]
     fn atom_holon_differs_from_direct_encoding() {
-        // 058-001: two legitimate encodings — direct (structural) and atomized (opaque).
-        // They must produce DIFFERENT vectors to represent the two different framings.
-        let (vm, se, reg) = fresh_env();
+        // BOOK Ch.54: opaque-identity wrap and structural encoding must
+        // produce distinct vectors. Atom(prog) ≠ prog at the geometric
+        // level — they answer different questions.
+        let (vm, se) = fresh_env();
         let make = || {
-            HolonAST::bundle(vec![
-                HolonAST::atom("x".to_string()),
-                HolonAST::atom("y".to_string()),
-            ])
+            HolonAST::bundle(vec![HolonAST::string("x"), HolonAST::string("y")])
         };
-        let v_direct = encode(&make(), &vm, &se, &reg);
-        let v_atomized = encode(&HolonAST::atom(make()), &vm, &se, &reg);
-        assert_ne!(
-            v_direct, v_atomized,
-            "Direct encoding (structural) and Atom wrapping (opaque identity) \
-             must produce different vectors — 058-001 two-encodings principle"
+        let v_direct = encode(&make(), &vm, &se);
+        let v_atomized = encode(&HolonAST::atom(make()), &vm, &se);
+        assert_ne!(v_direct, v_atomized);
+    }
+
+    #[test]
+    fn atom_wrap_is_repeatable() {
+        // Atom(Atom(x)) ≠ Atom(x) ≠ x — quote-wrapping is meaningful.
+        let (vm, se) = fresh_env();
+        let leaf = HolonAST::string("x");
+        let v_leaf = encode(&leaf, &vm, &se);
+        let v_atom = encode(&HolonAST::atom(leaf.clone()), &vm, &se);
+        let v_atom2 = encode(&HolonAST::atom(HolonAST::atom(leaf.clone())), &vm, &se);
+        assert_ne!(v_leaf, v_atom);
+        assert_ne!(v_atom, v_atom2);
+        assert_ne!(v_leaf, v_atom2);
+    }
+
+    // ─── Hash + Eq + cache key tests ────────────────────────────────────
+
+    #[test]
+    fn derive_hash_eq_via_hashmap() {
+        let mut m: HashMap<HolonAST, i64> = HashMap::new();
+        m.insert(HolonAST::string("foo"), 1);
+        m.insert(HolonAST::i64(42), 2);
+        m.insert(
+            HolonAST::bind(HolonAST::keyword("k"), HolonAST::i64(7)),
+            3,
         );
+        assert_eq!(m.get(&HolonAST::string("foo")), Some(&1));
+        assert_eq!(m.get(&HolonAST::i64(42)), Some(&2));
+        assert_eq!(
+            m.get(&HolonAST::bind(HolonAST::keyword("k"), HolonAST::i64(7))),
+            Some(&3)
+        );
+        assert!(m.get(&HolonAST::string("bar")).is_none());
     }
 
     #[test]
-    fn user_type_registration_path() {
-        // Applications register their own types before atomizing them.
-        #[derive(Debug)]
-        struct Candle {
-            open: f64,
-            close: f64,
-        }
-
-        let mut reg = AtomTypeRegistry::with_builtins();
-        reg.register::<Candle>("project/market/Candle", |v, _| {
-            let mut out = Vec::new();
-            out.extend_from_slice(&v.open.to_le_bytes());
-            out.extend_from_slice(&v.close.to_le_bytes());
-            out
-        });
-
-        let vm = VectorManager::with_seed(D, 42);
-        let se = ScalarEncoder::with_seed(D, 42);
-
-        let c1 = Candle {
-            open: 100.0,
-            close: 101.0,
+    fn f64_to_bits_hash_consistency() {
+        use std::collections::hash_map::DefaultHasher;
+        let h = |a: &HolonAST| {
+            let mut hasher = DefaultHasher::new();
+            a.hash(&mut hasher);
+            hasher.finish()
         };
-        let c2 = Candle {
-            open: 100.0,
-            close: 101.0,
-        };
-        let c3 = Candle {
-            open: 100.0,
-            close: 102.0,
-        };
-
-        let v1 = encode(&HolonAST::atom(c1), &vm, &se, &reg);
-        let v2 = encode(&HolonAST::atom(c2), &vm, &se, &reg);
-        let v3 = encode(&HolonAST::atom(c3), &vm, &se, &reg);
-
-        assert_eq!(v1, v2, "identical Candles produce identical vectors");
-        assert_ne!(v1, v3, "different Candles produce different vectors");
+        assert_eq!(h(&HolonAST::f64(0.1)), h(&HolonAST::f64(0.1)));
+        assert_ne!(h(&HolonAST::f64(0.1)), h(&HolonAST::f64(0.2)));
     }
 
     #[test]
-    #[should_panic(expected = "unregistered type")]
-    fn unregistered_type_panics() {
-        #[derive(Debug)]
-        struct Unknown(#[allow(dead_code)] i64);
-        let (vm, se, reg) = fresh_env();
-        // Unknown was not registered; encode must panic with a clear message.
-        let _ = encode(&HolonAST::atom(Unknown(1)), &vm, &se, &reg);
+    fn f64_nan_hash_consistent_for_same_bits() {
+        use std::collections::hash_map::DefaultHasher;
+        let h = |a: &HolonAST| {
+            let mut hasher = DefaultHasher::new();
+            a.hash(&mut hasher);
+            hasher.finish()
+        };
+        let nan_a = HolonAST::f64(f64::NAN);
+        let nan_b = HolonAST::f64(f64::from_bits(f64::NAN.to_bits()));
+        assert_eq!(h(&nan_a), h(&nan_b));
     }
 
-    // ─── Canonical-EDN tests ────────────────────────────────────────────────
+    // ─── Canonical-EDN tests ────────────────────────────────────────────
 
     #[test]
     fn canonical_edn_deterministic() {
-        let reg = AtomTypeRegistry::with_builtins();
         let make = || {
-            HolonAST::bundle(vec![
-                HolonAST::atom(42_i64),
-                HolonAST::atom("rsi".to_string()),
-            ])
+            HolonAST::bundle(vec![HolonAST::i64(42), HolonAST::string("rsi")])
         };
-        assert_eq!(
-            canonical_edn_holon(&make(), &reg),
-            canonical_edn_holon(&make(), &reg)
-        );
+        assert_eq!(canonical_edn_holon(&make()), canonical_edn_holon(&make()));
     }
 
     #[test]
     fn canonical_edn_variants_distinguished() {
-        // Two different variants with similar inner structure must produce
-        // different bytes.
-        let reg = AtomTypeRegistry::with_builtins();
-        let a = HolonAST::atom(1_i64);
-        let b = HolonAST::atom(2_i64);
-        let bound = HolonAST::bind(
-            HolonAST::atom(1_i64),
-            HolonAST::atom(2_i64),
-        );
-        let bundled = HolonAST::bundle(vec![a, b]);
+        let bound = HolonAST::bind(HolonAST::i64(1), HolonAST::i64(2));
+        let bundled = HolonAST::bundle(vec![HolonAST::i64(1), HolonAST::i64(2)]);
         assert_ne!(
-            canonical_edn_holon(&bound, &reg),
-            canonical_edn_holon(&bundled, &reg),
+            canonical_edn_holon(&bound),
+            canonical_edn_holon(&bundled),
             "Bind and Bundle of the same atoms must canonicalize differently"
         );
     }
