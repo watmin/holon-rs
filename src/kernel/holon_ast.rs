@@ -5,7 +5,7 @@
 //! so is `:outcome`. They have well-defined canonical encodings; they are
 //! terms in the algebra; they are HolonAST.
 //!
-//! Eleven variants:
+//! Twelve variants:
 //!
 //! - **Vocabulary leaves** (BOOK Ch.45): `Symbol`, `String`, `I64`, `F64`,
 //!   `Bool`. Irreducible content the encoder hashes to a deterministic
@@ -21,6 +21,13 @@
 //! - **Composites**: `Bind`, `Bundle`, `Permute`, `Thermometer`, `Blend`.
 //!   Similarity-preserving recursive encoding. Sub-parts recoverable via
 //!   `unbind`.
+//! - **Substrate-internal sentinel** (arc 073): `SlotMarker { min, max }`.
+//!   The placeholder a `term::template` operation produces in place of a
+//!   Thermometer's `value`. Carries the receptive field (min, max) so two
+//!   templates with different ranges don't collide; carries no value so
+//!   two thoughts with identical structure-and-range and different tuning
+//!   share a template. User-unconstructible at the wat surface; encoder
+//!   panics on it (templates are query keys, not encodable values).
 //!
 //! The algebra is closed: every term in `HolonAST` is itself `HolonAST`.
 //! `Hash + Eq` derive directly (manual impls only because f64 fields use
@@ -37,7 +44,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-/// The universal AST. Eleven variants. Closed under itself.
+/// The universal AST. Twelve variants. Closed under itself.
 ///
 /// `Clone` is O(1) — every recursive payload is `Arc`-wrapped.
 #[derive(Clone)]
@@ -95,6 +102,21 @@ pub enum HolonAST {
     /// `Blend(a, b, w1, w2)` — `threshold(w1·a + w2·b)`. Two independent
     /// real-valued weights; negative allowed (058-002 Option B).
     Blend(Arc<HolonAST>, Arc<HolonAST>, f64, f64),
+
+    // ─── Substrate-internal sentinel (arc 073) ──────────────────────────
+    /// `SlotMarker { min, max }` — placeholder for a Thermometer's `value`
+    /// in a `term::template` output. The receptive field (min, max) is
+    /// preserved (templates with different ranges are distinct cell
+    /// types); the `value` is discarded (templates with same range and
+    /// different values share a cell type, differing only in tuning).
+    ///
+    /// Not user-constructible at the wat surface. Returned by
+    /// `:wat::holon::term::template`; consumed by `TermStore::get`'s
+    /// template-equality check. Encoder panics on it — templates are
+    /// query keys, not encodable values; reaching the encoder with a
+    /// SlotMarker is a category error and surfacing it loudly beats
+    /// producing a silent zero vector.
+    SlotMarker { min: f64, max: f64 },
 }
 
 impl fmt::Debug for HolonAST {
@@ -123,6 +145,11 @@ impl fmt::Debug for HolonAST {
                 .field(b)
                 .field(w1)
                 .field(w2)
+                .finish(),
+            HolonAST::SlotMarker { min, max } => f
+                .debug_struct("SlotMarker")
+                .field("min", min)
+                .field("max", max)
                 .finish(),
         }
     }
@@ -155,6 +182,10 @@ impl PartialEq for HolonAST {
             (HolonAST::Blend(a1, b1, w1a, w2a), HolonAST::Blend(a2, b2, w1b, w2b)) => {
                 a1 == a2 && b1 == b2 && w1a.to_bits() == w1b.to_bits() && w2a.to_bits() == w2b.to_bits()
             }
+            (
+                HolonAST::SlotMarker { min: m1, max: x1 },
+                HolonAST::SlotMarker { min: m2, max: x2 },
+            ) => m1.to_bits() == m2.to_bits() && x1.to_bits() == x2.to_bits(),
             _ => false,
         }
     }
@@ -191,6 +222,10 @@ impl Hash for HolonAST {
                 b.hash(state);
                 w1.to_bits().hash(state);
                 w2.to_bits().hash(state);
+            }
+            HolonAST::SlotMarker { min, max } => {
+                min.to_bits().hash(state);
+                max.to_bits().hash(state);
             }
         }
     }
@@ -329,6 +364,7 @@ const TAG_BUNDLE: u8 = 0x03;
 const TAG_PERMUTE: u8 = 0x04;
 const TAG_THERMOMETER: u8 = 0x05;
 const TAG_BLEND: u8 = 0x06;
+const TAG_SLOT_MARKER: u8 = 0x07;
 
 // Type tags for primitive leaves. Byte-equivalent with the legacy
 // `Atom(Arc<dyn Any>)` registry encoding for the corresponding payload
@@ -414,6 +450,11 @@ pub fn canonical_edn_holon(ast: &HolonAST) -> Vec<u8> {
             out.extend_from_slice(&w1.to_le_bytes());
             out.extend_from_slice(&w2.to_le_bytes());
         }
+        HolonAST::SlotMarker { min, max } => {
+            out.push(TAG_SLOT_MARKER);
+            out.extend_from_slice(&min.to_le_bytes());
+            out.extend_from_slice(&max.to_le_bytes());
+        }
     }
     out
 }
@@ -493,6 +534,11 @@ pub fn encode(ast: &HolonAST, vm: &VectorManager, scalar: &ScalarEncoder) -> Vec
             let vb = encode(b, vm, scalar);
             Primitives::blend_weighted(&va, &vb, *w1, *w2)
         }
+        HolonAST::SlotMarker { .. } => panic!(
+            "encode: HolonAST::SlotMarker is a query-key sentinel, not an \
+             encodable value. Templates produced by `term::template` are not \
+             encodable; call `encode` on the original Thermometer-bearing form."
+        ),
     }
 }
 
