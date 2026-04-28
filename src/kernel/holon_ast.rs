@@ -354,6 +354,119 @@ impl HolonAST {
             _ => None,
         }
     }
+
+    // ─── Term decomposition (arc 073) ───────────────────────────────────
+
+    /// Return this AST with every `Thermometer { value, min, max }` leaf
+    /// replaced by `SlotMarker { min, max }`. Same structure otherwise.
+    /// Two thoughts that differ only in Thermometer values produce
+    /// identical templates; thoughts that differ in receptive fields
+    /// (min/max) or in any other variant produce distinct templates.
+    ///
+    /// The output is itself a `HolonAST` (the algebra remains closed)
+    /// but is INTENTIONALLY non-encodable: feeding a SlotMarker-bearing
+    /// template to `encode` panics with a category-error message.
+    pub fn template(&self) -> HolonAST {
+        match self {
+            HolonAST::Symbol(_)
+            | HolonAST::String(_)
+            | HolonAST::I64(_)
+            | HolonAST::F64(_)
+            | HolonAST::Bool(_) => self.clone(),
+            HolonAST::Atom(inner) => HolonAST::Atom(Arc::new(inner.template())),
+            HolonAST::Bind(a, b) => HolonAST::Bind(Arc::new(a.template()), Arc::new(b.template())),
+            HolonAST::Bundle(xs) => {
+                HolonAST::Bundle(Arc::new(xs.iter().map(|c| c.template()).collect()))
+            }
+            HolonAST::Permute(child, k) => HolonAST::Permute(Arc::new(child.template()), *k),
+            HolonAST::Thermometer { min, max, .. } => HolonAST::SlotMarker {
+                min: *min,
+                max: *max,
+            },
+            HolonAST::Blend(a, b, w1, w2) => HolonAST::Blend(
+                Arc::new(a.template()),
+                Arc::new(b.template()),
+                *w1,
+                *w2,
+            ),
+            HolonAST::SlotMarker { min, max } => HolonAST::SlotMarker {
+                min: *min,
+                max: *max,
+            },
+        }
+    }
+
+    /// Pre-order list of every `Thermometer` value in this AST. Empty
+    /// for forms with no Thermometer leaves. Parallel in length and
+    /// order to `ranges`.
+    pub fn slots(&self) -> Vec<f64> {
+        let mut out = Vec::new();
+        collect_slots(self, &mut out);
+        out
+    }
+
+    /// Pre-order list of every `Thermometer (min, max)` pair in this
+    /// AST. Empty for forms with no Thermometer leaves. Parallel in
+    /// length and order to `slots`.
+    pub fn ranges(&self) -> Vec<(f64, f64)> {
+        let mut out = Vec::new();
+        collect_ranges(self, &mut out);
+        out
+    }
+}
+
+fn collect_slots(ast: &HolonAST, out: &mut Vec<f64>) {
+    match ast {
+        HolonAST::Symbol(_)
+        | HolonAST::String(_)
+        | HolonAST::I64(_)
+        | HolonAST::F64(_)
+        | HolonAST::Bool(_)
+        | HolonAST::SlotMarker { .. } => {}
+        HolonAST::Atom(inner) => collect_slots(inner, out),
+        HolonAST::Bind(a, b) => {
+            collect_slots(a, out);
+            collect_slots(b, out);
+        }
+        HolonAST::Bundle(xs) => {
+            for c in xs.iter() {
+                collect_slots(c, out);
+            }
+        }
+        HolonAST::Permute(child, _) => collect_slots(child, out),
+        HolonAST::Thermometer { value, .. } => out.push(*value),
+        HolonAST::Blend(a, b, _, _) => {
+            collect_slots(a, out);
+            collect_slots(b, out);
+        }
+    }
+}
+
+fn collect_ranges(ast: &HolonAST, out: &mut Vec<(f64, f64)>) {
+    match ast {
+        HolonAST::Symbol(_)
+        | HolonAST::String(_)
+        | HolonAST::I64(_)
+        | HolonAST::F64(_)
+        | HolonAST::Bool(_)
+        | HolonAST::SlotMarker { .. } => {}
+        HolonAST::Atom(inner) => collect_ranges(inner, out),
+        HolonAST::Bind(a, b) => {
+            collect_ranges(a, out);
+            collect_ranges(b, out);
+        }
+        HolonAST::Bundle(xs) => {
+            for c in xs.iter() {
+                collect_ranges(c, out);
+            }
+        }
+        HolonAST::Permute(child, _) => collect_ranges(child, out),
+        HolonAST::Thermometer { min, max, .. } => out.push((*min, *max)),
+        HolonAST::Blend(a, b, _, _) => {
+            collect_ranges(a, out);
+            collect_ranges(b, out);
+        }
+    }
 }
 
 // Variant tags for canonical-EDN serialization. Distinct bytes per variant so
@@ -878,5 +991,111 @@ mod tests {
             canonical_edn_holon(&bundled),
             "Bind and Bundle of the same atoms must canonicalize differently"
         );
+    }
+
+    // ─── Term decomposition tests (arc 073) ─────────────────────────────
+
+    fn rsi_thought(value: f64) -> HolonAST {
+        HolonAST::bind(
+            HolonAST::keyword("rsi-thought"),
+            HolonAST::thermometer(value, 0.0, 100.0),
+        )
+    }
+
+    #[test]
+    fn template_replaces_thermometer_with_slot_marker() {
+        let form = rsi_thought(70.0);
+        let tpl = form.template();
+        match &tpl {
+            HolonAST::Bind(a, b) => {
+                assert_eq!(a.as_symbol(), Some(":rsi-thought"));
+                assert!(matches!(
+                    **b,
+                    HolonAST::SlotMarker { min, max } if min == 0.0 && max == 100.0
+                ));
+            }
+            other => panic!("expected Bind(_, SlotMarker), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn template_collapses_thoughts_with_different_tuning() {
+        // Different value, same range → identical templates.
+        assert_eq!(rsi_thought(70.0).template(), rsi_thought(30.0).template());
+    }
+
+    #[test]
+    fn template_distinguishes_different_ranges() {
+        // Same shape, same value, different range → distinct templates.
+        let a = HolonAST::bind(
+            HolonAST::keyword("x"),
+            HolonAST::thermometer(0.5, 0.0, 1.0),
+        );
+        let b = HolonAST::bind(
+            HolonAST::keyword("x"),
+            HolonAST::thermometer(0.5, -1.0, 1.0),
+        );
+        assert_ne!(a.template(), b.template());
+    }
+
+    #[test]
+    fn template_distinguishes_different_atoms() {
+        // Same range, different keyword → distinct templates.
+        let a = rsi_thought(70.0);
+        let b = HolonAST::bind(
+            HolonAST::keyword("macd-thought"),
+            HolonAST::thermometer(70.0, 0.0, 100.0),
+        );
+        assert_ne!(a.template(), b.template());
+    }
+
+    #[test]
+    fn slots_pre_order() {
+        // Bundle of two thoughts: pre-order yields rsi.value then macd.value.
+        let form = HolonAST::bundle(vec![
+            rsi_thought(70.0),
+            HolonAST::bind(
+                HolonAST::keyword("macd-thought"),
+                HolonAST::thermometer(0.25, -1.0, 1.0),
+            ),
+        ]);
+        assert_eq!(form.slots(), vec![70.0, 0.25]);
+    }
+
+    #[test]
+    fn slots_and_ranges_parallel() {
+        let form = HolonAST::bundle(vec![
+            rsi_thought(70.0),
+            HolonAST::thermometer(0.25, -1.0, 1.0),
+        ]);
+        let slots = form.slots();
+        let ranges = form.ranges();
+        assert_eq!(slots.len(), ranges.len());
+        assert_eq!(slots, vec![70.0, 0.25]);
+        assert_eq!(ranges, vec![(0.0, 100.0), (-1.0, 1.0)]);
+    }
+
+    #[test]
+    fn empty_slots_for_thermometer_free_form() {
+        let form = HolonAST::bind(HolonAST::keyword("x"), HolonAST::i64(42));
+        assert!(form.slots().is_empty());
+        assert!(form.ranges().is_empty());
+    }
+
+    #[test]
+    fn slot_marker_does_not_re_emit_slot() {
+        // Decomposing a template (which already contains SlotMarker)
+        // produces empty slots — SlotMarker carries no value to extract.
+        let tpl = rsi_thought(70.0).template();
+        assert!(tpl.slots().is_empty());
+        assert!(tpl.ranges().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "SlotMarker is a query-key sentinel")]
+    fn encode_template_panics() {
+        let (vm, se) = fresh_env();
+        let tpl = rsi_thought(70.0).template();
+        let _ = encode(&tpl, &vm, &se);
     }
 }
