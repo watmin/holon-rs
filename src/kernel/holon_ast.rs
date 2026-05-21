@@ -50,13 +50,25 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub enum HolonAST {
     // ─── Vocabulary leaves ──────────────────────────────────────────────
-    /// Keyword content (e.g. `:outcome`). Stored bytes include the leading
-    /// colon. Distinct from `String` at the type level (different leaf
-    /// variant); content-equivalent at the canonical-bytes level (both
-    /// hash through the `"String"` type tag — a `Symbol(":outcome")` and
-    /// a `String(":outcome")` produce identical seeds, but the lab's
-    /// keywords always carry the colon prefix and strings never do, so
-    /// content disambiguates in practice).
+    /// Bare-name content (identifier-shaped). Accommodates three Clojure-EDN
+    /// shapes via content-level discrimination on leading colon:
+    ///
+    /// - **Keyword** — leading colon, e.g. `Symbol(":outcome")`. The canonical
+    ///   case across the lab + wat-rs; user code's `:foo` parses to this.
+    /// - **Bare symbol** — no leading colon, e.g. `Symbol("foo")`. Identifier
+    ///   reference; resolves to its binding at evaluation time (function name,
+    ///   binding name, argument name).
+    /// - **Nil literal** — `Symbol("nil")`. The EDN nil literal; distinct from
+    ///   the keyword `:nil`. Used by arc 216 Stone 216.8's `#none` payload
+    ///   encoding (`Bind(Atom(String("#none")), Atom(Symbol("nil")))`) and by
+    ///   `Value::Unit` ↔ EDN `nil` round-trip.
+    ///
+    /// Distinct from `String` at the type level (different leaf variant);
+    /// content-equivalent at the canonical-bytes level (both hash through the
+    /// `"String"` type tag — a `Symbol(":outcome")` and a `String(":outcome")`
+    /// produce identical seeds). The colon-prefix convention (or its absence)
+    /// disambiguates keyword/symbol/nil semantically; the substrate variant is
+    /// the same.
     Symbol(Arc<str>),
 
     /// String literal content. Stored bytes are exactly the string.
