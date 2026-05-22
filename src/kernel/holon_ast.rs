@@ -44,7 +44,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-/// The universal AST. Twelve variants. Closed under itself.
+/// The universal AST. Thirteen variants. Closed under itself.
 ///
 /// `Clone` is O(1) — every recursive payload is `Arc`-wrapped.
 #[derive(Clone)]
@@ -83,6 +83,15 @@ pub enum HolonAST {
 
     /// Boolean leaf.
     Bool(bool),
+
+    /// Char leaf — single Unicode scalar value. EDN-literal form `\a`,
+    /// `\newline`, `\u{NNNN}` per Clojure-EDN spec. BMP-only is a wat-rs
+    /// surface concern (arc 220 Stone 220.2); holon-rs accepts full `char`.
+    ///
+    /// Distinct from `String(":outcome")` and `Symbol(":outcome")` at both
+    /// the type level AND the canonical-bytes level — `PRIM_TAG_CHAR` is
+    /// a distinct seed; the vector identity differs from String/Symbol.
+    Char(char),
 
     // ─── Opaque-identity wrap ───────────────────────────────────────────
     /// Wrap a HolonAST as an opaque-identity unit. The wrapped AST's
@@ -139,6 +148,7 @@ impl fmt::Debug for HolonAST {
             HolonAST::I64(n) => f.debug_tuple("I64").field(n).finish(),
             HolonAST::F64(x) => f.debug_tuple("F64").field(x).finish(),
             HolonAST::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
+            HolonAST::Char(c) => f.debug_tuple("Char").field(c).finish(),
             HolonAST::Atom(h) => f.debug_tuple("Atom").field(h).finish(),
             HolonAST::Bind(a, b) => f.debug_tuple("Bind").field(a).field(b).finish(),
             HolonAST::Bundle(children) => f.debug_tuple("Bundle").field(children).finish(),
@@ -175,6 +185,7 @@ impl PartialEq for HolonAST {
             (HolonAST::I64(a), HolonAST::I64(b)) => a == b,
             (HolonAST::F64(a), HolonAST::F64(b)) => a.to_bits() == b.to_bits(),
             (HolonAST::Bool(a), HolonAST::Bool(b)) => a == b,
+            (HolonAST::Char(a), HolonAST::Char(b)) => a == b,
             (HolonAST::Atom(a), HolonAST::Atom(b)) => a == b,
             (HolonAST::Bind(a1, b1), HolonAST::Bind(a2, b2)) => a1 == a2 && b1 == b2,
             (HolonAST::Bundle(xs), HolonAST::Bundle(ys)) => xs == ys,
@@ -214,6 +225,7 @@ impl Hash for HolonAST {
             HolonAST::I64(n) => n.hash(state),
             HolonAST::F64(x) => x.to_bits().hash(state),
             HolonAST::Bool(b) => b.hash(state),
+            HolonAST::Char(c) => (*c as u32).hash(state),
             HolonAST::Atom(h) => h.hash(state),
             HolonAST::Bind(a, b) => {
                 a.hash(state);
@@ -269,6 +281,12 @@ impl HolonAST {
     /// Construct a `Bool` leaf.
     pub fn bool_(b: bool) -> Self {
         HolonAST::Bool(b)
+    }
+
+    /// Construct a `Char` leaf from a Rust `char`. The substrate accepts
+    /// full Unicode; BMP-only enforcement is a wat-rs surface concern.
+    pub fn char_(c: char) -> Self {
+        HolonAST::Char(c)
     }
 
     /// Construct a keyword `Symbol` leaf with the leading colon
@@ -384,7 +402,8 @@ impl HolonAST {
             | HolonAST::String(_)
             | HolonAST::I64(_)
             | HolonAST::F64(_)
-            | HolonAST::Bool(_) => self.clone(),
+            | HolonAST::Bool(_)
+            | HolonAST::Char(_) => self.clone(),
             HolonAST::Atom(inner) => HolonAST::Atom(Arc::new(inner.template())),
             HolonAST::Bind(a, b) => HolonAST::Bind(Arc::new(a.template()), Arc::new(b.template())),
             HolonAST::Bundle(xs) => {
@@ -434,6 +453,7 @@ fn collect_slots(ast: &HolonAST, out: &mut Vec<f64>) {
         | HolonAST::I64(_)
         | HolonAST::F64(_)
         | HolonAST::Bool(_)
+        | HolonAST::Char(_)
         | HolonAST::SlotMarker { .. } => {}
         HolonAST::Atom(inner) => collect_slots(inner, out),
         HolonAST::Bind(a, b) => {
@@ -461,6 +481,7 @@ fn collect_ranges(ast: &HolonAST, out: &mut Vec<(f64, f64)>) {
         | HolonAST::I64(_)
         | HolonAST::F64(_)
         | HolonAST::Bool(_)
+        | HolonAST::Char(_)
         | HolonAST::SlotMarker { .. } => {}
         HolonAST::Atom(inner) => collect_ranges(inner, out),
         HolonAST::Bind(a, b) => {
@@ -502,6 +523,7 @@ const PRIM_TAG_STRING: &str = "String";
 const PRIM_TAG_I64: &str = "i64";
 const PRIM_TAG_F64: &str = "f64";
 const PRIM_TAG_BOOL: &str = "bool";
+const PRIM_TAG_CHAR: &str = "char";
 const ATOM_INNER_TAG: &str = "wat/algebra/Holon";
 
 fn write_atom_payload(out: &mut Vec<u8>, type_tag: &str, payload: &[u8]) {
@@ -529,6 +551,7 @@ pub fn canonical_edn_holon(ast: &HolonAST) -> Vec<u8> {
         HolonAST::I64(n) => write_atom_payload(&mut out, PRIM_TAG_I64, &n.to_le_bytes()),
         HolonAST::F64(x) => write_atom_payload(&mut out, PRIM_TAG_F64, &x.to_le_bytes()),
         HolonAST::Bool(b) => write_atom_payload(&mut out, PRIM_TAG_BOOL, &[*b as u8]),
+        HolonAST::Char(c) => write_atom_payload(&mut out, PRIM_TAG_CHAR, &(*c as u32).to_le_bytes()),
         HolonAST::Atom(inner) => {
             let inner_bytes = canonical_edn_holon(inner);
             write_atom_payload(&mut out, ATOM_INNER_TAG, &inner_bytes);
@@ -617,6 +640,10 @@ pub fn encode(ast: &HolonAST, vm: &VectorManager, scalar: &ScalarEncoder) -> Vec
         }
         HolonAST::Bool(b) => {
             let seed = leaf_seed(PRIM_TAG_BOOL, &[*b as u8], vm.global_seed());
+            deterministic_vector_from_seed(seed, vm.dimensions())
+        }
+        HolonAST::Char(c) => {
+            let seed = leaf_seed(PRIM_TAG_CHAR, &(*c as u32).to_le_bytes(), vm.global_seed());
             deterministic_vector_from_seed(seed, vm.dimensions())
         }
         HolonAST::Atom(inner) => {
@@ -1109,5 +1136,45 @@ mod tests {
         let (vm, se) = fresh_env();
         let tpl = rsi_thought(70.0).template();
         let _ = encode(&tpl, &vm, &se);
+    }
+
+    // ─── Char leaf tests (arc 221 Stone 221.1) ──────────────────────────
+
+    #[test]
+    fn char_leaf_round_trip() {
+        let h = HolonAST::char_('a');
+        assert_eq!(h, HolonAST::Char('a'));
+        assert_ne!(h, HolonAST::char_('b'));
+        // Hash determinism: same char → same hash
+        let mut h1 = std::collections::hash_map::DefaultHasher::new();
+        h.hash(&mut h1);
+        let mut h2 = std::collections::hash_map::DefaultHasher::new();
+        HolonAST::char_('a').hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    #[test]
+    fn char_distinct_from_string() {
+        // Char('a') and String("a") MUST produce distinct canonical bytes
+        // (and therefore distinct VSA vectors). PRIM_TAG_CHAR ≠ PRIM_TAG_STRING.
+        let char_bytes = canonical_edn_holon(&HolonAST::char_('a'));
+        let str_bytes = canonical_edn_holon(&HolonAST::string("a"));
+        assert_ne!(
+            char_bytes,
+            str_bytes,
+            "Char('a') and String(\"a\") MUST differ in canonical bytes"
+        );
+    }
+
+    #[test]
+    fn char_distinct_from_symbol() {
+        // Char('a') and Symbol("a") MUST produce distinct canonical bytes.
+        let char_bytes = canonical_edn_holon(&HolonAST::char_('a'));
+        let sym_bytes = canonical_edn_holon(&HolonAST::symbol("a"));
+        assert_ne!(
+            char_bytes,
+            sym_bytes,
+            "Char('a') and Symbol(\"a\") MUST differ in canonical bytes"
+        );
     }
 }
