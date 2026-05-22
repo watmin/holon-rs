@@ -44,31 +44,22 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-/// The universal AST. Thirteen variants. Closed under itself.
+/// The universal AST. Sixteen variants. Closed under itself.
 ///
 /// `Clone` is O(1) — every recursive payload is `Arc`-wrapped.
 #[derive(Clone)]
 pub enum HolonAST {
     // ─── Vocabulary leaves ──────────────────────────────────────────────
-    /// Bare-name content (identifier-shaped). Accommodates three Clojure-EDN
-    /// shapes via content-level discrimination on leading colon:
+    /// Bare-identifier leaf — e.g. `Symbol("foo")` represents the
+    /// identifier `foo` (resolves to its binding at evaluation time:
+    /// function name, binding name, argument name).
     ///
-    /// - **Keyword** — leading colon, e.g. `Symbol(":outcome")`. The canonical
-    ///   case across the lab + wat-rs; user code's `:foo` parses to this.
-    /// - **Bare symbol** — no leading colon, e.g. `Symbol("foo")`. Identifier
-    ///   reference; resolves to its binding at evaluation time (function name,
-    ///   binding name, argument name).
-    /// - **Nil literal** — `Symbol("nil")`. The EDN nil literal; distinct from
-    ///   the keyword `:nil`. Used by arc 216 Stone 216.8's `#none` payload
-    ///   encoding (`Bind(Atom(String("#none")), Atom(Symbol("nil")))`) and by
-    ///   `Value::Unit` ↔ EDN `nil` round-trip.
-    ///
-    /// Distinct from `String` at the type level (different leaf variant);
-    /// content-equivalent at the canonical-bytes level (both hash through the
-    /// `"String"` type tag — a `Symbol(":outcome")` and a `String(":outcome")`
-    /// produce identical seeds). The colon-prefix convention (or its absence)
-    /// disambiguates keyword/symbol/nil semantically; the substrate variant is
-    /// the same.
+    /// Distinct from `Keyword("foo")` (represents `:foo`) and `String("foo")`
+    /// (string literal `"foo"`) at the type level. Currently shares the
+    /// `PRIM_TAG_STRING` canonical-bytes seed with `String` — this is a
+    /// pre-arc-216 accepted-collision documented at the PRIM_TAG block;
+    /// Stone 221.5 resolves it. The collision is acceptable today because
+    /// type-level distinctness suffices for the variant matching needs.
     Symbol(Arc<str>),
 
     /// String literal content. Stored bytes are exactly the string.
@@ -92,6 +83,37 @@ pub enum HolonAST {
     /// the type level AND the canonical-bytes level — `PRIM_TAG_CHAR` is
     /// a distinct seed; the vector identity differs from String/Symbol.
     Char(char),
+
+    /// Keyword leaf — Clojure-EDN keyword form `:foo`, `:wat.core/Some`.
+    /// Stored content is the keyword name MINUS the leading colon
+    /// (`Keyword("foo")` represents `:foo`).
+    ///
+    /// Distinct from `Symbol("foo")` and `String("foo")` at the type level
+    /// AND canonical-bytes level — `PRIM_TAG_KEYWORD` seeds a distinct
+    /// vector identity.
+    ///
+    /// Replaces the pre-arc-221 leading-colon-in-Symbol convention:
+    /// `Symbol(":foo")` is no longer the keyword encoding; `Keyword("foo")` is.
+    Keyword(Arc<str>),
+
+    /// Nil leaf — the EDN `nil` literal. Distinct from any other primitive
+    /// at the type level AND canonical-bytes level via `PRIM_TAG_NIL`.
+    ///
+    /// Replaces the pre-arc-221 `Symbol("nil")` convention: the nil literal
+    /// is now its own variant; `Symbol("nil")` would be the bare identifier
+    /// "nil" (different semantic).
+    Nil,
+
+    /// Tag leaf — EDN tagged-literal dispatch marker, e.g. `#uuid` parses
+    /// to `Tag("uuid")`. Composes with payload via `Bind(Tag(t), payload)`
+    /// per arc 221 doctrine — bare-leaf payload, no Atom wrapping.
+    ///
+    /// Stored content is the tag name MINUS the leading `#`
+    /// (`Tag("uuid")` represents `#uuid`).
+    ///
+    /// Distinct from `Symbol("uuid")` and `Symbol("#uuid")` byte-for-byte
+    /// via `PRIM_TAG_TAG`.
+    Tag(Arc<str>),
 
     // ─── Opaque-identity wrap ───────────────────────────────────────────
     /// Wrap a HolonAST as an opaque-identity unit. The wrapped AST's
@@ -149,6 +171,9 @@ impl fmt::Debug for HolonAST {
             HolonAST::F64(x) => f.debug_tuple("F64").field(x).finish(),
             HolonAST::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
             HolonAST::Char(c) => f.debug_tuple("Char").field(c).finish(),
+            HolonAST::Keyword(s) => f.debug_tuple("Keyword").field(&&**s).finish(),
+            HolonAST::Nil => f.debug_tuple("Nil").finish(),
+            HolonAST::Tag(s) => f.debug_tuple("Tag").field(&&**s).finish(),
             HolonAST::Atom(h) => f.debug_tuple("Atom").field(h).finish(),
             HolonAST::Bind(a, b) => f.debug_tuple("Bind").field(a).field(b).finish(),
             HolonAST::Bundle(children) => f.debug_tuple("Bundle").field(children).finish(),
@@ -186,6 +211,9 @@ impl PartialEq for HolonAST {
             (HolonAST::F64(a), HolonAST::F64(b)) => a.to_bits() == b.to_bits(),
             (HolonAST::Bool(a), HolonAST::Bool(b)) => a == b,
             (HolonAST::Char(a), HolonAST::Char(b)) => a == b,
+            (HolonAST::Keyword(a), HolonAST::Keyword(b)) => a == b,
+            (HolonAST::Nil, HolonAST::Nil) => true,
+            (HolonAST::Tag(a), HolonAST::Tag(b)) => a == b,
             (HolonAST::Atom(a), HolonAST::Atom(b)) => a == b,
             (HolonAST::Bind(a1, b1), HolonAST::Bind(a2, b2)) => a1 == a2 && b1 == b2,
             (HolonAST::Bundle(xs), HolonAST::Bundle(ys)) => xs == ys,
@@ -226,6 +254,9 @@ impl Hash for HolonAST {
             HolonAST::F64(x) => x.to_bits().hash(state),
             HolonAST::Bool(b) => b.hash(state),
             HolonAST::Char(c) => (*c as u32).hash(state),
+            HolonAST::Keyword(s) => s.hash(state),
+            HolonAST::Nil => { /* discriminant alone suffices */ }
+            HolonAST::Tag(s) => s.hash(state),
             HolonAST::Atom(h) => h.hash(state),
             HolonAST::Bind(a, b) => {
                 a.hash(state);
@@ -289,19 +320,38 @@ impl HolonAST {
         HolonAST::Char(c)
     }
 
-    /// Construct a keyword `Symbol` leaf with the leading colon
-    /// normalized. `HolonAST::keyword("foo")` and `HolonAST::keyword(":foo")`
-    /// produce the same atom.
+    /// Construct a `Keyword` leaf with the leading colon stripped.
+    /// `HolonAST::keyword("foo")` and `HolonAST::keyword(":foo")` produce
+    /// the same `Keyword("foo")` variant.
+    ///
+    /// Per arc 221: keyword is its own variant (replaces the pre-arc-221
+    /// convention of encoding `:foo` as `Symbol(":foo")`).
     pub fn keyword(name: &str) -> Self {
-        let stored: Arc<str> = if name.starts_with(':') {
-            Arc::from(name)
+        let stored: Arc<str> = if let Some(stripped) = name.strip_prefix(':') {
+            Arc::from(stripped)
         } else {
-            let mut s = String::with_capacity(name.len() + 1);
-            s.push(':');
-            s.push_str(name);
-            Arc::from(s)
+            Arc::from(name)
         };
-        HolonAST::Symbol(stored)
+        HolonAST::Keyword(stored)
+    }
+
+    /// Construct a `Nil` leaf — the EDN nil literal.
+    pub fn nil() -> Self {
+        HolonAST::Nil
+    }
+
+    /// Construct a `Tag` leaf with the leading `#` stripped.
+    /// `HolonAST::tag("uuid")` and `HolonAST::tag("#uuid")` produce the
+    /// same `Tag("uuid")` variant. Compose with payload via
+    /// `HolonAST::bind(HolonAST::tag("uuid"), HolonAST::string(hex))` per
+    /// arc 221 doctrine.
+    pub fn tag(name: &str) -> Self {
+        let stored: Arc<str> = if let Some(stripped) = name.strip_prefix('#') {
+            Arc::from(stripped)
+        } else {
+            Arc::from(name)
+        };
+        HolonAST::Tag(stored)
     }
 
     /// Wrap a HolonAST as an opaque-identity Atom. See the [`HolonAST::Atom`]
@@ -385,6 +435,22 @@ impl HolonAST {
         }
     }
 
+    /// If this is a `Keyword` leaf, return the content (without leading colon).
+    pub fn as_keyword(&self) -> Option<&str> {
+        match self {
+            HolonAST::Keyword(s) => Some(s.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// If this is a `Tag` leaf, return the content (without leading `#`).
+    pub fn as_tag(&self) -> Option<&str> {
+        match self {
+            HolonAST::Tag(s) => Some(s.as_ref()),
+            _ => None,
+        }
+    }
+
     // ─── Term decomposition (arc 073) ───────────────────────────────────
 
     /// Return this AST with every `Thermometer { value, min, max }` leaf
@@ -403,7 +469,10 @@ impl HolonAST {
             | HolonAST::I64(_)
             | HolonAST::F64(_)
             | HolonAST::Bool(_)
-            | HolonAST::Char(_) => self.clone(),
+            | HolonAST::Char(_)
+            | HolonAST::Keyword(_)
+            | HolonAST::Nil
+            | HolonAST::Tag(_) => self.clone(),
             HolonAST::Atom(inner) => HolonAST::Atom(Arc::new(inner.template())),
             HolonAST::Bind(a, b) => HolonAST::Bind(Arc::new(a.template()), Arc::new(b.template())),
             HolonAST::Bundle(xs) => {
@@ -454,6 +523,9 @@ fn collect_slots(ast: &HolonAST, out: &mut Vec<f64>) {
         | HolonAST::F64(_)
         | HolonAST::Bool(_)
         | HolonAST::Char(_)
+        | HolonAST::Keyword(_)
+        | HolonAST::Nil
+        | HolonAST::Tag(_)
         | HolonAST::SlotMarker { .. } => {}
         HolonAST::Atom(inner) => collect_slots(inner, out),
         HolonAST::Bind(a, b) => {
@@ -482,6 +554,9 @@ fn collect_ranges(ast: &HolonAST, out: &mut Vec<(f64, f64)>) {
         | HolonAST::F64(_)
         | HolonAST::Bool(_)
         | HolonAST::Char(_)
+        | HolonAST::Keyword(_)
+        | HolonAST::Nil
+        | HolonAST::Tag(_)
         | HolonAST::SlotMarker { .. } => {}
         HolonAST::Atom(inner) => collect_ranges(inner, out),
         HolonAST::Bind(a, b) => {
@@ -524,6 +599,9 @@ const PRIM_TAG_I64: &str = "i64";
 const PRIM_TAG_F64: &str = "f64";
 const PRIM_TAG_BOOL: &str = "bool";
 const PRIM_TAG_CHAR: &str = "char";
+const PRIM_TAG_KEYWORD: &str = "keyword";
+const PRIM_TAG_NIL: &str = "nil";
+const PRIM_TAG_TAG: &str = "tag";
 const ATOM_INNER_TAG: &str = "wat/algebra/Holon";
 
 fn write_atom_payload(out: &mut Vec<u8>, type_tag: &str, payload: &[u8]) {
@@ -552,6 +630,9 @@ pub fn canonical_edn_holon(ast: &HolonAST) -> Vec<u8> {
         HolonAST::F64(x) => write_atom_payload(&mut out, PRIM_TAG_F64, &x.to_le_bytes()),
         HolonAST::Bool(b) => write_atom_payload(&mut out, PRIM_TAG_BOOL, &[*b as u8]),
         HolonAST::Char(c) => write_atom_payload(&mut out, PRIM_TAG_CHAR, &(*c as u32).to_le_bytes()),
+        HolonAST::Keyword(s) => write_atom_payload(&mut out, PRIM_TAG_KEYWORD, s.as_bytes()),
+        HolonAST::Nil => write_atom_payload(&mut out, PRIM_TAG_NIL, &[]),
+        HolonAST::Tag(s) => write_atom_payload(&mut out, PRIM_TAG_TAG, s.as_bytes()),
         HolonAST::Atom(inner) => {
             let inner_bytes = canonical_edn_holon(inner);
             write_atom_payload(&mut out, ATOM_INNER_TAG, &inner_bytes);
@@ -644,6 +725,18 @@ pub fn encode(ast: &HolonAST, vm: &VectorManager, scalar: &ScalarEncoder) -> Vec
         }
         HolonAST::Char(c) => {
             let seed = leaf_seed(PRIM_TAG_CHAR, &(*c as u32).to_le_bytes(), vm.global_seed());
+            deterministic_vector_from_seed(seed, vm.dimensions())
+        }
+        HolonAST::Keyword(s) => {
+            let seed = leaf_seed(PRIM_TAG_KEYWORD, s.as_bytes(), vm.global_seed());
+            deterministic_vector_from_seed(seed, vm.dimensions())
+        }
+        HolonAST::Nil => {
+            let seed = leaf_seed(PRIM_TAG_NIL, &[], vm.global_seed());
+            deterministic_vector_from_seed(seed, vm.dimensions())
+        }
+        HolonAST::Tag(s) => {
+            let seed = leaf_seed(PRIM_TAG_TAG, s.as_bytes(), vm.global_seed());
             deterministic_vector_from_seed(seed, vm.dimensions())
         }
         HolonAST::Atom(inner) => {
@@ -746,11 +839,9 @@ mod tests {
 
     #[test]
     fn keyword_vs_string_distinct_by_content() {
-        // Keyword stored content begins with `:`; string doesn't.
-        // Symbol and String share a canonical type tag, so different
-        // leaves with identical content WOULD collide — but the lab's
-        // convention puts a colon on every keyword and never on a
-        // string, so content disambiguates.
+        // Per arc 221: Keyword("foo/bar") uses PRIM_TAG_KEYWORD; String("foo/bar")
+        // uses PRIM_TAG_STRING. They produce distinct canonical bytes and
+        // therefore distinct VSA vectors at the type level.
         let (vm, se) = fresh_env();
         let v_kw = encode(&HolonAST::keyword("foo/bar"), &vm, &se);
         let v_str = encode(&HolonAST::string("foo/bar"), &vm, &se);
@@ -759,7 +850,8 @@ mod tests {
 
     #[test]
     fn keyword_normalization() {
-        // HolonAST::keyword normalizes the leading colon either way.
+        // HolonAST::keyword normalizes the leading colon either way — both
+        // produce Keyword("foo") with the same stored content.
         let (vm, se) = fresh_env();
         let v_no_colon = encode(&HolonAST::keyword("foo"), &vm, &se);
         let v_with_colon = encode(&HolonAST::keyword(":foo"), &vm, &se);
@@ -767,15 +859,17 @@ mod tests {
     }
 
     #[test]
-    fn keyword_vs_prefixed_string_at_symbol_layer() {
-        // HolonAST::keyword("foo") produces Symbol(":foo").
-        // HolonAST::symbol(":foo") produces the same canonical bytes
-        // (Symbol shares the "String" type tag with String). Both
-        // produce the same vector.
+    fn keyword_distinct_from_symbol_at_type_level() {
+        // Per arc 221: Keyword("foo") uses PRIM_TAG_KEYWORD; Symbol(":foo")
+        // uses PRIM_TAG_STRING. They are distinct at the canonical-bytes
+        // AND vector level. This replaces the pre-arc-221 test
+        // `keyword_vs_prefixed_string_at_symbol_layer` which asserted equality
+        // under the old Symbol(":foo") convention.
         let (vm, se) = fresh_env();
         let v_kw = encode(&HolonAST::keyword("foo"), &vm, &se);
-        let v_direct = encode(&HolonAST::symbol(":foo"), &vm, &se);
-        assert_eq!(v_kw, v_direct);
+        let v_sym = encode(&HolonAST::symbol(":foo"), &vm, &se);
+        assert_ne!(v_kw, v_sym,
+            "Keyword(\"foo\") and Symbol(\":foo\") must be distinct after arc 221");
     }
 
     #[test]
@@ -801,7 +895,7 @@ mod tests {
         assert_eq!(HolonAST::f64(3.14).as_f64(), Some(3.14));
         assert_eq!(HolonAST::bool_(true).as_bool(), Some(true));
         assert_eq!(HolonAST::string("foo").as_string(), Some("foo"));
-        assert_eq!(HolonAST::keyword("k").as_symbol(), Some(":k"));
+        assert_eq!(HolonAST::keyword("k").as_keyword(), Some("k"));
     }
 
     #[test]
@@ -1047,7 +1141,7 @@ mod tests {
         let tpl = form.template();
         match &tpl {
             HolonAST::Bind(a, b) => {
-                assert_eq!(a.as_symbol(), Some(":rsi-thought"));
+                assert_eq!(a.as_keyword(), Some("rsi-thought"));
                 assert!(matches!(
                     **b,
                     HolonAST::SlotMarker { min, max } if min == 0.0 && max == 100.0
@@ -1176,5 +1270,110 @@ mod tests {
             sym_bytes,
             "Char('a') and Symbol(\"a\") MUST differ in canonical bytes"
         );
+    }
+
+    // ─── Keyword / Nil / Tag leaf tests (arc 221 Stone 221.3) ───────────
+
+    #[test]
+    fn keyword_leaf_round_trip() {
+        let h = HolonAST::keyword("foo");
+        assert_eq!(h, HolonAST::Keyword(Arc::from("foo")));
+        // Leading colon stripped
+        assert_eq!(HolonAST::keyword(":foo"), HolonAST::keyword("foo"));
+        // Hash determinism
+        let mut h1 = std::collections::hash_map::DefaultHasher::new();
+        h.hash(&mut h1);
+        let mut h2 = std::collections::hash_map::DefaultHasher::new();
+        HolonAST::keyword("foo").hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    #[test]
+    fn nil_leaf_round_trip() {
+        let h = HolonAST::nil();
+        assert_eq!(h, HolonAST::Nil);
+        // Hash determinism
+        let mut h1 = std::collections::hash_map::DefaultHasher::new();
+        h.hash(&mut h1);
+        let mut h2 = std::collections::hash_map::DefaultHasher::new();
+        HolonAST::nil().hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    #[test]
+    fn tag_leaf_round_trip() {
+        let h = HolonAST::tag("uuid");
+        assert_eq!(h, HolonAST::Tag(Arc::from("uuid")));
+        // Leading # stripped
+        assert_eq!(HolonAST::tag("#uuid"), HolonAST::tag("uuid"));
+    }
+
+    #[test]
+    fn keyword_distinct_from_symbol() {
+        let kw_bytes = canonical_edn_holon(&HolonAST::keyword("foo"));
+        let sym_bytes = canonical_edn_holon(&HolonAST::symbol("foo"));
+        assert_ne!(kw_bytes, sym_bytes,
+            "Keyword(\"foo\") and Symbol(\"foo\") MUST differ in canonical bytes");
+    }
+
+    #[test]
+    fn nil_distinct_from_symbol_nil() {
+        // The pre-arc-221 convention encoded nil as Symbol("nil").
+        // Now Nil MUST differ from Symbol("nil") byte-for-byte.
+        let nil_bytes = canonical_edn_holon(&HolonAST::nil());
+        let sym_nil_bytes = canonical_edn_holon(&HolonAST::symbol("nil"));
+        assert_ne!(nil_bytes, sym_nil_bytes,
+            "Nil and Symbol(\"nil\") MUST differ in canonical bytes");
+    }
+
+    #[test]
+    fn tag_distinct_from_symbol() {
+        let tag_bytes = canonical_edn_holon(&HolonAST::tag("uuid"));
+        let sym_bytes = canonical_edn_holon(&HolonAST::symbol("uuid"));
+        let sym_hashed_bytes = canonical_edn_holon(&HolonAST::symbol("#uuid"));
+        assert_ne!(tag_bytes, sym_bytes,
+            "Tag(\"uuid\") and Symbol(\"uuid\") MUST differ in canonical bytes");
+        assert_ne!(tag_bytes, sym_hashed_bytes,
+            "Tag(\"uuid\") and Symbol(\"#uuid\") MUST differ in canonical bytes");
+    }
+
+    #[test]
+    fn keyword_distinct_from_nil() {
+        let kw_bytes = canonical_edn_holon(&HolonAST::keyword("nil"));
+        let nil_bytes = canonical_edn_holon(&HolonAST::nil());
+        assert_ne!(kw_bytes, nil_bytes,
+            "Keyword(\"nil\") and Nil MUST differ in canonical bytes");
+    }
+
+    #[test]
+    fn tag_distinct_from_keyword() {
+        let tag_bytes = canonical_edn_holon(&HolonAST::tag("foo"));
+        let kw_bytes = canonical_edn_holon(&HolonAST::keyword("foo"));
+        assert_ne!(tag_bytes, kw_bytes,
+            "Tag(\"foo\") and Keyword(\"foo\") MUST differ in canonical bytes");
+    }
+
+    #[test]
+    fn nil_distinct_from_bool() {
+        let nil_bytes = canonical_edn_holon(&HolonAST::nil());
+        let true_bytes = canonical_edn_holon(&HolonAST::bool_(true));
+        let false_bytes = canonical_edn_holon(&HolonAST::bool_(false));
+        assert_ne!(nil_bytes, true_bytes);
+        assert_ne!(nil_bytes, false_bytes);
+    }
+
+    #[test]
+    fn as_keyword_returns_content_without_colon() {
+        assert_eq!(HolonAST::keyword("foo").as_keyword(), Some("foo"));
+        assert_eq!(HolonAST::keyword(":foo").as_keyword(), Some("foo"));
+        assert_eq!(HolonAST::symbol("foo").as_keyword(), None);
+        assert_eq!(HolonAST::nil().as_keyword(), None);
+    }
+
+    #[test]
+    fn as_tag_returns_content_without_hash() {
+        assert_eq!(HolonAST::tag("uuid").as_tag(), Some("uuid"));
+        assert_eq!(HolonAST::tag("#uuid").as_tag(), Some("uuid"));
+        assert_eq!(HolonAST::symbol("uuid").as_tag(), None);
     }
 }

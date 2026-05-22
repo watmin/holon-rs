@@ -1100,7 +1100,7 @@ mod tests {
 
         let labels = r.labels();
         assert_eq!(labels.len(), 3);
-        assert!(matches!(r.label_ast(labels[0]), Some(HolonAST::Symbol(_))));
+        assert!(matches!(r.label_ast(labels[0]), Some(HolonAST::Keyword(_))));
         assert!(matches!(r.label_ast(labels[2]), Some(HolonAST::Bind(_, _))));
         // Out-of-range handle → None.
         assert!(r.label_ast(Label::from_index(99)).is_none());
