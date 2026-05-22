@@ -55,11 +55,14 @@ pub enum HolonAST {
     /// function name, binding name, argument name).
     ///
     /// Distinct from `Keyword("foo")` (represents `:foo`) and `String("foo")`
-    /// (string literal `"foo"`) at the type level. Currently shares the
-    /// `PRIM_TAG_STRING` canonical-bytes seed with `String` — this is a
-    /// pre-arc-216 accepted-collision documented at the PRIM_TAG block;
-    /// Stone 221.5 resolves it. The collision is acceptable today because
-    /// type-level distinctness suffices for the variant matching needs.
+    /// (string literal `"foo"`) at the type level AND at the canonical-bytes
+    /// level. `PRIM_TAG_SYMBOL = "symbol"` seeds a distinct vector identity
+    /// from `PRIM_TAG_STRING = "String"` — the pre-arc-216 Symbol/String
+    /// canonical-bytes collision is resolved by arc 221 Stone 221.5.
+    ///
+    /// Keyword/nil/nil conventions (the pre-arc-221 `Symbol(":foo")` and
+    /// `Symbol("nil")` encodings) are retired — use `Keyword("foo")` and
+    /// `Nil` respectively.
     Symbol(Arc<str>),
 
     /// String literal content. Stored bytes are exactly the string.
@@ -594,6 +597,7 @@ const TAG_SLOT_MARKER: u8 = 0x07;
 // for primitive-atom call sites; the only encoding shifts come from
 // previously-WatAST-payload paths (e.g. `(:wat::holon::Atom (:wat::core::quote
 // :foo))`) where the surface now lowers to a `Symbol` leaf instead.
+const PRIM_TAG_SYMBOL: &str = "symbol";
 const PRIM_TAG_STRING: &str = "String";
 const PRIM_TAG_I64: &str = "i64";
 const PRIM_TAG_F64: &str = "f64";
@@ -624,7 +628,7 @@ pub fn canonical_edn_holon(ast: &HolonAST) -> Vec<u8> {
         // shape the legacy `Atom(Arc<dyn Any>)` did, so vectors match
         // byte-for-byte where the legacy surface produced an Atom of
         // the corresponding payload.
-        HolonAST::Symbol(s) => write_atom_payload(&mut out, PRIM_TAG_STRING, s.as_bytes()),
+        HolonAST::Symbol(s) => write_atom_payload(&mut out, PRIM_TAG_SYMBOL, s.as_bytes()),
         HolonAST::String(s) => write_atom_payload(&mut out, PRIM_TAG_STRING, s.as_bytes()),
         HolonAST::I64(n) => write_atom_payload(&mut out, PRIM_TAG_I64, &n.to_le_bytes()),
         HolonAST::F64(x) => write_atom_payload(&mut out, PRIM_TAG_F64, &x.to_le_bytes()),
@@ -704,7 +708,7 @@ fn leaf_seed(type_tag: &str, payload: &[u8], global_seed: u64) -> u64 {
 pub fn encode(ast: &HolonAST, vm: &VectorManager, scalar: &ScalarEncoder) -> Vector {
     match ast {
         HolonAST::Symbol(s) => {
-            let seed = leaf_seed(PRIM_TAG_STRING, s.as_bytes(), vm.global_seed());
+            let seed = leaf_seed(PRIM_TAG_SYMBOL, s.as_bytes(), vm.global_seed());
             deterministic_vector_from_seed(seed, vm.dimensions())
         }
         HolonAST::String(s) => {
@@ -1375,5 +1379,33 @@ mod tests {
         assert_eq!(HolonAST::tag("uuid").as_tag(), Some("uuid"));
         assert_eq!(HolonAST::tag("#uuid").as_tag(), Some("uuid"));
         assert_eq!(HolonAST::symbol("uuid").as_tag(), None);
+    }
+
+    // ─── Symbol/String canonical-bytes seed distinction (arc 221 Stone 221.5) ──
+
+    #[test]
+    fn symbol_string_canonical_bytes_distinct() {
+        // Stone 221.5: PRIM_TAG_SYMBOL ("symbol") distinct from PRIM_TAG_STRING ("String").
+        // Symbol("x") and String("x") MUST produce distinct canonical bytes.
+        let sym_bytes = canonical_edn_holon(&HolonAST::symbol("x"));
+        let str_bytes = canonical_edn_holon(&HolonAST::string("x"));
+        assert_ne!(
+            sym_bytes,
+            str_bytes,
+            "Symbol(\"x\") and String(\"x\") MUST differ in canonical bytes (Stone 221.5)"
+        );
+    }
+
+    #[test]
+    fn symbol_string_vectors_distinct() {
+        // Stone 221.5: Symbol and String produce distinct VSA vectors at matched content.
+        let (vm, se) = fresh_env();
+        let v_sym = encode(&HolonAST::symbol("x"), &vm, &se);
+        let v_str = encode(&HolonAST::string("x"), &vm, &se);
+        assert_ne!(
+            v_sym,
+            v_str,
+            "Symbol(\"x\") and String(\"x\") MUST produce distinct vectors (Stone 221.5)"
+        );
     }
 }
