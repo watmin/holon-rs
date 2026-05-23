@@ -5,29 +5,31 @@
 //! so is `:outcome`. They have well-defined canonical encodings; they are
 //! terms in the algebra; they are HolonAST.
 //!
-//! Twelve variants:
+//! **Twelve true primitives** (arc 230 — typed-entities doctrine):
 //!
-//! - **Vocabulary leaves** (BOOK Ch.45): `Symbol`, `String`, `I64`, `F64`,
-//!   `Bool`. Irreducible content the encoder hashes to a deterministic
-//!   identity vector. These are the algebra's atoms in the Lisp `atom?`
-//!   predicate sense.
-//! - **Opaque-identity wrap** (BOOK Ch.54): `Atom(Arc<HolonAST>)`. Wraps a
-//!   composite Holon as an opaque-identity unit — the resulting vector
-//!   hashes the canonical-EDN bytes of the wrapped AST as a single seed
-//!   instead of recursively encoding sub-parts. The substrate's
-//!   programs-as-data path: `Atom(prog)` and direct `prog` produce
-//!   semantically distinct vectors (the first is opaque, the second is
-//!   structural). Collapsing them would lose a real algebraic operation.
-//! - **Composites**: `Bind`, `Bundle`, `Permute`, `Thermometer`, `Blend`.
+//! - **Holder** (arc 225): `Atom(Arc<HolonAST>)`. The algebra's quote —
+//!   minimal holder, repeatable holds compose. Wraps any HolonAST as an
+//!   opaque-identity unit: the resulting vector hashes the canonical-EDN
+//!   bytes of the wrapped AST as a single seed instead of recursively
+//!   encoding sub-parts.
+//! - **Composers**: `Bind`, `Bundle`, `Permute`, `Thermometer`, `Blend`.
 //!   Similarity-preserving recursive encoding. Sub-parts recoverable via
 //!   `unbind`.
+//! - **Raw carriers**: `String`, `I64`, `F64`, `Bool`, `Char`. Irreducible
+//!   content the encoder hashes to a deterministic identity vector.
 //! - **Substrate-internal sentinel** (arc 073): `SlotMarker { min, max }`.
 //!   The placeholder a `term::template` operation produces in place of a
-//!   Thermometer's `value`. Carries the receptive field (min, max) so two
-//!   templates with different ranges don't collide; carries no value so
-//!   two thoughts with identical structure-and-range and different tuning
-//!   share a template. User-unconstructible at the wat surface; encoder
+//!   Thermometer's `value`. User-unconstructible at the wat surface; encoder
 //!   panics on it (templates are query keys, not encodable values).
+//!
+//! **Retired convenience variants** (arc 230 supersession):
+//! `Symbol`, `Keyword`, `Tag`, `Nil` were convenience shortcuts over
+//! `Bind(Atom, Atom)` compositions. Per the typed-entities doctrine every
+//! typed value at user-surface compiles to `(Bind (Atom class) (Atom data))`.
+//! The constructor helpers (`symbol()`, `keyword()`, `tag()`, `nil()`)
+//! are preserved API-surface — they now produce the Bind composition.
+//! The accessor helpers (`as_symbol()`, `as_keyword()`, `as_tag()`,
+//! `is_nil()`) are preserved — they now recognise the Bind composition.
 //!
 //! The algebra is closed: every term in `HolonAST` is itself `HolonAST`.
 //! `Hash + Eq` derive directly (manual impls only because f64 fields use
@@ -44,27 +46,18 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-/// The universal AST. Sixteen variants. Closed under itself.
+/// The universal AST. Twelve true primitives. Closed under itself.
+///
+/// Arc 230 (typed-entities doctrine): the four convenience variants
+/// `Symbol`, `Keyword`, `Tag`, `Nil` are retired. Their constructor helpers
+/// (`symbol()`, `keyword()`, `tag()`, `nil()`) now produce pure
+/// `Bind(Atom, Atom)` compositions. Accessors (`as_symbol()`,
+/// `as_keyword()`, `as_tag()`, `is_nil()`) recognise the compositions.
 ///
 /// `Clone` is O(1) — every recursive payload is `Arc`-wrapped.
 #[derive(Clone)]
 pub enum HolonAST {
-    // ─── Vocabulary leaves ──────────────────────────────────────────────
-    /// Bare-identifier leaf — e.g. `Symbol("foo")` represents the
-    /// identifier `foo` (resolves to its binding at evaluation time:
-    /// function name, binding name, argument name).
-    ///
-    /// Distinct from `Keyword("foo")` (represents `:foo`) and `String("foo")`
-    /// (string literal `"foo"`) at the type level AND at the canonical-bytes
-    /// level. `PRIM_TAG_SYMBOL = "symbol"` seeds a distinct vector identity
-    /// from `PRIM_TAG_STRING = "String"` — the pre-arc-216 Symbol/String
-    /// canonical-bytes collision is resolved by arc 221 Stone 221.5.
-    ///
-    /// Keyword/nil/nil conventions (the pre-arc-221 `Symbol(":foo")` and
-    /// `Symbol("nil")` encodings) are retired — use `Keyword("foo")` and
-    /// `Nil` respectively.
-    Symbol(Arc<str>),
-
+    // ─── Raw carriers ───────────────────────────────────────────────────
     /// String literal content. Stored bytes are exactly the string.
     String(Arc<str>),
 
@@ -81,42 +74,7 @@ pub enum HolonAST {
     /// Char leaf — single Unicode scalar value. EDN-literal form `\a`,
     /// `\newline`, `\u{NNNN}` per Clojure-EDN spec. BMP-only is a wat-rs
     /// surface concern (arc 220 Stone 220.2); holon-rs accepts full `char`.
-    ///
-    /// Distinct from `String(":outcome")` and `Symbol(":outcome")` at both
-    /// the type level AND the canonical-bytes level — `PRIM_TAG_CHAR` is
-    /// a distinct seed; the vector identity differs from String/Symbol.
     Char(char),
-
-    /// Keyword leaf — Clojure-EDN keyword form `:foo`, `:wat.core/Some`.
-    /// Stored content is the keyword name MINUS the leading colon
-    /// (`Keyword("foo")` represents `:foo`).
-    ///
-    /// Distinct from `Symbol("foo")` and `String("foo")` at the type level
-    /// AND canonical-bytes level — `PRIM_TAG_KEYWORD` seeds a distinct
-    /// vector identity.
-    ///
-    /// Replaces the pre-arc-221 leading-colon-in-Symbol convention:
-    /// `Symbol(":foo")` is no longer the keyword encoding; `Keyword("foo")` is.
-    Keyword(Arc<str>),
-
-    /// Nil leaf — the EDN `nil` literal. Distinct from any other primitive
-    /// at the type level AND canonical-bytes level via `PRIM_TAG_NIL`.
-    ///
-    /// Replaces the pre-arc-221 `Symbol("nil")` convention: the nil literal
-    /// is now its own variant; `Symbol("nil")` would be the bare identifier
-    /// "nil" (different semantic).
-    Nil,
-
-    /// Tag leaf — EDN tagged-literal dispatch marker, e.g. `#uuid` parses
-    /// to `Tag("uuid")`. Composes with payload via `Bind(Tag(t), payload)`
-    /// per arc 221 doctrine — bare-leaf payload, no Atom wrapping.
-    ///
-    /// Stored content is the tag name MINUS the leading `#`
-    /// (`Tag("uuid")` represents `#uuid`).
-    ///
-    /// Distinct from `Symbol("uuid")` and `Symbol("#uuid")` byte-for-byte
-    /// via `PRIM_TAG_TAG`.
-    Tag(Arc<str>),
 
     // ─── Opaque-identity wrap ───────────────────────────────────────────
     /// Wrap a HolonAST as an opaque-identity unit. The wrapped AST's
@@ -168,15 +126,11 @@ pub enum HolonAST {
 impl fmt::Debug for HolonAST {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HolonAST::Symbol(s) => f.debug_tuple("Symbol").field(&&**s).finish(),
             HolonAST::String(s) => f.debug_tuple("String").field(&&**s).finish(),
             HolonAST::I64(n) => f.debug_tuple("I64").field(n).finish(),
             HolonAST::F64(x) => f.debug_tuple("F64").field(x).finish(),
             HolonAST::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
             HolonAST::Char(c) => f.debug_tuple("Char").field(c).finish(),
-            HolonAST::Keyword(s) => f.debug_tuple("Keyword").field(&&**s).finish(),
-            HolonAST::Nil => f.debug_tuple("Nil").finish(),
-            HolonAST::Tag(s) => f.debug_tuple("Tag").field(&&**s).finish(),
             HolonAST::Atom(h) => f.debug_tuple("Atom").field(h).finish(),
             HolonAST::Bind(a, b) => f.debug_tuple("Bind").field(a).field(b).finish(),
             HolonAST::Bundle(children) => f.debug_tuple("Bundle").field(children).finish(),
@@ -208,15 +162,11 @@ impl fmt::Debug for HolonAST {
 impl PartialEq for HolonAST {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (HolonAST::Symbol(a), HolonAST::Symbol(b)) => a == b,
             (HolonAST::String(a), HolonAST::String(b)) => a == b,
             (HolonAST::I64(a), HolonAST::I64(b)) => a == b,
             (HolonAST::F64(a), HolonAST::F64(b)) => a.to_bits() == b.to_bits(),
             (HolonAST::Bool(a), HolonAST::Bool(b)) => a == b,
             (HolonAST::Char(a), HolonAST::Char(b)) => a == b,
-            (HolonAST::Keyword(a), HolonAST::Keyword(b)) => a == b,
-            (HolonAST::Nil, HolonAST::Nil) => true,
-            (HolonAST::Tag(a), HolonAST::Tag(b)) => a == b,
             (HolonAST::Atom(a), HolonAST::Atom(b)) => a == b,
             (HolonAST::Bind(a1, b1), HolonAST::Bind(a2, b2)) => a1 == a2 && b1 == b2,
             (HolonAST::Bundle(xs), HolonAST::Bundle(ys)) => xs == ys,
@@ -251,15 +201,11 @@ impl Hash for HolonAST {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match self {
-            HolonAST::Symbol(s) => s.hash(state),
             HolonAST::String(s) => s.hash(state),
             HolonAST::I64(n) => n.hash(state),
             HolonAST::F64(x) => x.to_bits().hash(state),
             HolonAST::Bool(b) => b.hash(state),
             HolonAST::Char(c) => (*c as u32).hash(state),
-            HolonAST::Keyword(s) => s.hash(state),
-            HolonAST::Nil => { /* discriminant alone suffices */ }
-            HolonAST::Tag(s) => s.hash(state),
             HolonAST::Atom(h) => h.hash(state),
             HolonAST::Bind(a, b) => {
                 a.hash(state);
@@ -290,11 +236,49 @@ impl Hash for HolonAST {
 }
 
 impl HolonAST {
-    /// Construct a `Symbol` leaf from raw content. The caller is
-    /// responsible for the `:`-prefix convention; use [`HolonAST::keyword`]
-    /// for normalized keyword construction.
+    // ─── Internal helper: build a classified Bind composition ───────────
+    //
+    // `Bind(Atom(String(classifier)), Atom(String(content)))` is the
+    // canonical encoding for Symbol / Keyword / Tag / Nil per arc 230
+    // (typed-entities doctrine). All four retired variant constructors
+    // and all four accessors go through this shape.
+    fn classified(classifier: &str, content: &str) -> Self {
+        HolonAST::Bind(
+            Arc::new(HolonAST::Atom(Arc::new(HolonAST::String(Arc::from(classifier))))),
+            Arc::new(HolonAST::Atom(Arc::new(HolonAST::String(Arc::from(content))))),
+        )
+    }
+
+    // Extract `content` from `Bind(Atom(String(expected_cls)), Atom(String(content)))`.
+    // Returns None if the shape doesn't match or the classifier differs.
+    fn extract_classified<'a>(h: &'a HolonAST, expected_cls: &str) -> Option<&'a str> {
+        match h {
+            HolonAST::Bind(a, b) => match (a.as_ref(), b.as_ref()) {
+                (HolonAST::Atom(ac), HolonAST::Atom(bc)) => {
+                    match (ac.as_ref(), bc.as_ref()) {
+                        (HolonAST::String(cls), HolonAST::String(val))
+                            if cls.as_ref() == expected_cls =>
+                        {
+                            Some(val.as_ref())
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Construct a Symbol composition — arc 230 supersession of `HolonAST::Symbol(s)`.
+    ///
+    /// Returns `Bind(Atom(String("Symbol")), Atom(String(content)))`.
+    /// The `Symbol` variant is retired (arc 230); this helper preserves the
+    /// constructor API while producing the pure Bind composition per the
+    /// typed-entities doctrine.
     pub fn symbol(content: impl Into<Arc<str>>) -> Self {
-        HolonAST::Symbol(content.into())
+        let s: Arc<str> = content.into();
+        HolonAST::classified("Symbol", s.as_ref())
     }
 
     /// Construct a `String` leaf.
@@ -323,38 +307,47 @@ impl HolonAST {
         HolonAST::Char(c)
     }
 
-    /// Construct a `Keyword` leaf with the leading colon stripped.
-    /// `HolonAST::keyword("foo")` and `HolonAST::keyword(":foo")` produce
-    /// the same `Keyword("foo")` variant.
+    /// Construct a Keyword composition — arc 230 supersession of `HolonAST::Keyword(s)`.
     ///
-    /// Per arc 221: keyword is its own variant (replaces the pre-arc-221
-    /// convention of encoding `:foo` as `Symbol(":foo")`).
+    /// Returns `Bind(Atom(String("Keyword")), Atom(String(name_without_colon)))`.
+    /// `HolonAST::keyword("foo")` and `HolonAST::keyword(":foo")` produce
+    /// the same composition (leading colon stripped).
+    ///
+    /// Arc 221 minted `HolonAST::Keyword`; arc 230 supersedes with Bind composition
+    /// per the typed-entities doctrine.
     pub fn keyword(name: &str) -> Self {
-        let stored: Arc<str> = if let Some(stripped) = name.strip_prefix(':') {
-            Arc::from(stripped)
+        let stored = if let Some(stripped) = name.strip_prefix(':') {
+            stripped
         } else {
-            Arc::from(name)
+            name
         };
-        HolonAST::Keyword(stored)
+        HolonAST::classified("Keyword", stored)
     }
 
-    /// Construct a `Nil` leaf — the EDN nil literal.
+    /// Construct a Nil composition — arc 230 supersession of `HolonAST::Nil`.
+    ///
+    /// Returns `Bind(Atom(String("Symbol")), Atom(String("nil")))`.
+    /// Per user 2026-05-22 articulation: nil encodes as Symbol("nil") composition.
+    ///
+    /// Arc 221 minted `HolonAST::Nil`; arc 230 supersedes with Bind composition.
     pub fn nil() -> Self {
-        HolonAST::Nil
+        HolonAST::classified("Symbol", "nil")
     }
 
-    /// Construct a `Tag` leaf with the leading `#` stripped.
-    /// `HolonAST::tag("uuid")` and `HolonAST::tag("#uuid")` produce the
-    /// same `Tag("uuid")` variant. Compose with payload via
-    /// `HolonAST::bind(HolonAST::tag("uuid"), HolonAST::string(hex))` per
-    /// arc 221 doctrine.
+    /// Construct a Tag composition — arc 230 supersession of `HolonAST::Tag(s)`.
+    ///
+    /// Returns `Bind(Atom(String("Tag")), Atom(String(name_without_hash)))`.
+    /// `HolonAST::tag("uuid")` and `HolonAST::tag("#uuid")` produce the same
+    /// composition (leading `#` stripped).
+    ///
+    /// Arc 221 minted `HolonAST::Tag`; arc 230 supersedes with Bind composition.
     pub fn tag(name: &str) -> Self {
-        let stored: Arc<str> = if let Some(stripped) = name.strip_prefix('#') {
-            Arc::from(stripped)
+        let stored = if let Some(stripped) = name.strip_prefix('#') {
+            stripped
         } else {
-            Arc::from(name)
+            name
         };
-        HolonAST::Tag(stored)
+        HolonAST::classified("Tag", stored)
     }
 
     /// Wrap a HolonAST as an opaque-identity Atom. See the [`HolonAST::Atom`]
@@ -389,13 +382,16 @@ impl HolonAST {
     }
 
     // ─── Per-variant accessors (Option<T>) ──────────────────────────────
+    //
+    // Arc 230: Symbol/Keyword/Tag/Nil variants retired. Accessors now
+    // recognise the Bind(Atom(String(classifier)), Atom(String(content)))
+    // composition produced by the updated constructors.
 
-    /// If this is a `Symbol` leaf, return the content.
+    /// If this is a Symbol composition, return the content.
+    ///
+    /// Arc 230: recognises `Bind(Atom(String("Symbol")), Atom(String(s)))`.
     pub fn as_symbol(&self) -> Option<&str> {
-        match self {
-            HolonAST::Symbol(s) => Some(s.as_ref()),
-            _ => None,
-        }
+        HolonAST::extract_classified(self, "Symbol")
     }
 
     /// If this is a `String` leaf, return the content.
@@ -438,20 +434,25 @@ impl HolonAST {
         }
     }
 
-    /// If this is a `Keyword` leaf, return the content (without leading colon).
+    /// If this is a Keyword composition, return the content (without leading colon).
+    ///
+    /// Arc 230: recognises `Bind(Atom(String("Keyword")), Atom(String(s)))`.
     pub fn as_keyword(&self) -> Option<&str> {
-        match self {
-            HolonAST::Keyword(s) => Some(s.as_ref()),
-            _ => None,
-        }
+        HolonAST::extract_classified(self, "Keyword")
     }
 
-    /// If this is a `Tag` leaf, return the content (without leading `#`).
+    /// If this is a Tag composition, return the content (without leading `#`).
+    ///
+    /// Arc 230: recognises `Bind(Atom(String("Tag")), Atom(String(s)))`.
     pub fn as_tag(&self) -> Option<&str> {
-        match self {
-            HolonAST::Tag(s) => Some(s.as_ref()),
-            _ => None,
-        }
+        HolonAST::extract_classified(self, "Tag")
+    }
+
+    /// Returns true if this is the Nil composition.
+    ///
+    /// Arc 230: recognises `Bind(Atom(String("Symbol")), Atom(String("nil")))`.
+    pub fn is_nil(&self) -> bool {
+        HolonAST::extract_classified(self, "Symbol") == Some("nil")
     }
 
     // ─── Term decomposition (arc 073) ───────────────────────────────────
@@ -467,15 +468,11 @@ impl HolonAST {
     /// template to `encode` panics with a category-error message.
     pub fn template(&self) -> HolonAST {
         match self {
-            HolonAST::Symbol(_)
-            | HolonAST::String(_)
+            HolonAST::String(_)
             | HolonAST::I64(_)
             | HolonAST::F64(_)
             | HolonAST::Bool(_)
-            | HolonAST::Char(_)
-            | HolonAST::Keyword(_)
-            | HolonAST::Nil
-            | HolonAST::Tag(_) => self.clone(),
+            | HolonAST::Char(_) => self.clone(),
             HolonAST::Atom(inner) => HolonAST::Atom(Arc::new(inner.template())),
             HolonAST::Bind(a, b) => HolonAST::Bind(Arc::new(a.template()), Arc::new(b.template())),
             HolonAST::Bundle(xs) => {
@@ -520,15 +517,11 @@ impl HolonAST {
 
 fn collect_slots(ast: &HolonAST, out: &mut Vec<f64>) {
     match ast {
-        HolonAST::Symbol(_)
-        | HolonAST::String(_)
+        HolonAST::String(_)
         | HolonAST::I64(_)
         | HolonAST::F64(_)
         | HolonAST::Bool(_)
         | HolonAST::Char(_)
-        | HolonAST::Keyword(_)
-        | HolonAST::Nil
-        | HolonAST::Tag(_)
         | HolonAST::SlotMarker { .. } => {}
         HolonAST::Atom(inner) => collect_slots(inner, out),
         HolonAST::Bind(a, b) => {
@@ -551,15 +544,11 @@ fn collect_slots(ast: &HolonAST, out: &mut Vec<f64>) {
 
 fn collect_ranges(ast: &HolonAST, out: &mut Vec<(f64, f64)>) {
     match ast {
-        HolonAST::Symbol(_)
-        | HolonAST::String(_)
+        HolonAST::String(_)
         | HolonAST::I64(_)
         | HolonAST::F64(_)
         | HolonAST::Bool(_)
         | HolonAST::Char(_)
-        | HolonAST::Keyword(_)
-        | HolonAST::Nil
-        | HolonAST::Tag(_)
         | HolonAST::SlotMarker { .. } => {}
         HolonAST::Atom(inner) => collect_ranges(inner, out),
         HolonAST::Bind(a, b) => {
@@ -590,22 +579,16 @@ const TAG_THERMOMETER: u8 = 0x05;
 const TAG_BLEND: u8 = 0x06;
 const TAG_SLOT_MARKER: u8 = 0x07;
 
-// Type tags for primitive leaves. Byte-equivalent with the legacy
-// `Atom(Arc<dyn Any>)` registry encoding for the corresponding payload
-// type — a `Symbol(":foo")` produces the same canonical bytes today's
-// `Atom(":foo".to_string())` did. Preserves proof 002 vector identity
-// for primitive-atom call sites; the only encoding shifts come from
-// previously-WatAST-payload paths (e.g. `(:wat::holon::Atom (:wat::core::quote
-// :foo))`) where the surface now lowers to a `Symbol` leaf instead.
-const PRIM_TAG_SYMBOL: &str = "symbol";
+// Type tags for primitive leaves (the 8 true primitive raw carriers + Atom).
+// Arc 230: PRIM_TAG_SYMBOL / PRIM_TAG_KEYWORD / PRIM_TAG_NIL / PRIM_TAG_TAG
+// removed — those variants are retired. Symbol/Keyword/Tag/Nil now encode as
+// Bind compositions; the canonical bytes come from the Bind/Atom/String
+// structure without any PRIM_TAG seed of their own.
 const PRIM_TAG_STRING: &str = "String";
 const PRIM_TAG_I64: &str = "i64";
 const PRIM_TAG_F64: &str = "f64";
 const PRIM_TAG_BOOL: &str = "bool";
 const PRIM_TAG_CHAR: &str = "char";
-const PRIM_TAG_KEYWORD: &str = "keyword";
-const PRIM_TAG_NIL: &str = "nil";
-const PRIM_TAG_TAG: &str = "tag";
 const ATOM_INNER_TAG: &str = "wat/algebra/Holon";
 
 fn write_atom_payload(out: &mut Vec<u8>, type_tag: &str, payload: &[u8]) {
@@ -621,22 +604,19 @@ fn write_atom_payload(out: &mut Vec<u8>, type_tag: &str, payload: &[u8]) {
 /// Deterministic across all constructions of the same AST shape. Two
 /// different ASTs produce different bytes. Same input → same bytes →
 /// same vector seed.
+///
+/// Arc 230: Symbol/Keyword/Tag/Nil variants retired. Those forms now
+/// encode as `Bind(Atom(String(cls)), Atom(String(val)))` compositions;
+/// their canonical bytes come from the Bind/Atom/String structure naturally.
 pub fn canonical_edn_holon(ast: &HolonAST) -> Vec<u8> {
     let mut out = Vec::new();
     match ast {
-        // Primitive leaves use the same `[TAG_ATOM, type_tag, payload]`
-        // shape the legacy `Atom(Arc<dyn Any>)` did, so vectors match
-        // byte-for-byte where the legacy surface produced an Atom of
-        // the corresponding payload.
-        HolonAST::Symbol(s) => write_atom_payload(&mut out, PRIM_TAG_SYMBOL, s.as_bytes()),
+        // Primitive leaves use the `[TAG_ATOM, type_tag, payload]` shape.
         HolonAST::String(s) => write_atom_payload(&mut out, PRIM_TAG_STRING, s.as_bytes()),
         HolonAST::I64(n) => write_atom_payload(&mut out, PRIM_TAG_I64, &n.to_le_bytes()),
         HolonAST::F64(x) => write_atom_payload(&mut out, PRIM_TAG_F64, &x.to_le_bytes()),
         HolonAST::Bool(b) => write_atom_payload(&mut out, PRIM_TAG_BOOL, &[*b as u8]),
         HolonAST::Char(c) => write_atom_payload(&mut out, PRIM_TAG_CHAR, &(*c as u32).to_le_bytes()),
-        HolonAST::Keyword(s) => write_atom_payload(&mut out, PRIM_TAG_KEYWORD, s.as_bytes()),
-        HolonAST::Nil => write_atom_payload(&mut out, PRIM_TAG_NIL, &[]),
-        HolonAST::Tag(s) => write_atom_payload(&mut out, PRIM_TAG_TAG, s.as_bytes()),
         HolonAST::Atom(inner) => {
             let inner_bytes = canonical_edn_holon(inner);
             write_atom_payload(&mut out, ATOM_INNER_TAG, &inner_bytes);
@@ -705,12 +685,15 @@ fn leaf_seed(type_tag: &str, payload: &[u8], global_seed: u64) -> u64 {
 
 /// Realize a HolonAST into a Vector by walking the AST and dispatching to
 /// the lowercase Rust primitives.
+///
+/// Arc 230: Symbol/Keyword/Tag/Nil variants retired. Those forms now
+/// encode as `Bind(Atom(String(cls)), Atom(String(val)))` compositions
+/// which are handled by the `Bind` and `Atom` arms naturally — no
+/// special PRIM_TAG seed needed. The structural Bind encoding is the
+/// discriminator (STOP-8 check: Symbol("foo") vs Keyword("foo") differ
+/// because their classifier atoms differ: "Symbol" vs "Keyword").
 pub fn encode(ast: &HolonAST, vm: &VectorManager, scalar: &ScalarEncoder) -> Vector {
     match ast {
-        HolonAST::Symbol(s) => {
-            let seed = leaf_seed(PRIM_TAG_SYMBOL, s.as_bytes(), vm.global_seed());
-            deterministic_vector_from_seed(seed, vm.dimensions())
-        }
         HolonAST::String(s) => {
             let seed = leaf_seed(PRIM_TAG_STRING, s.as_bytes(), vm.global_seed());
             deterministic_vector_from_seed(seed, vm.dimensions())
@@ -729,18 +712,6 @@ pub fn encode(ast: &HolonAST, vm: &VectorManager, scalar: &ScalarEncoder) -> Vec
         }
         HolonAST::Char(c) => {
             let seed = leaf_seed(PRIM_TAG_CHAR, &(*c as u32).to_le_bytes(), vm.global_seed());
-            deterministic_vector_from_seed(seed, vm.dimensions())
-        }
-        HolonAST::Keyword(s) => {
-            let seed = leaf_seed(PRIM_TAG_KEYWORD, s.as_bytes(), vm.global_seed());
-            deterministic_vector_from_seed(seed, vm.dimensions())
-        }
-        HolonAST::Nil => {
-            let seed = leaf_seed(PRIM_TAG_NIL, &[], vm.global_seed());
-            deterministic_vector_from_seed(seed, vm.dimensions())
-        }
-        HolonAST::Tag(s) => {
-            let seed = leaf_seed(PRIM_TAG_TAG, s.as_bytes(), vm.global_seed());
             deterministic_vector_from_seed(seed, vm.dimensions())
         }
         HolonAST::Atom(inner) => {
@@ -843,9 +814,8 @@ mod tests {
 
     #[test]
     fn keyword_vs_string_distinct_by_content() {
-        // Per arc 221: Keyword("foo/bar") uses PRIM_TAG_KEYWORD; String("foo/bar")
-        // uses PRIM_TAG_STRING. They produce distinct canonical bytes and
-        // therefore distinct VSA vectors at the type level.
+        // Arc 230: keyword("foo/bar") = Bind(Atom("Keyword"), Atom("foo/bar")).
+        // string("foo/bar") = raw String leaf. Structurally distinct.
         let (vm, se) = fresh_env();
         let v_kw = encode(&HolonAST::keyword("foo/bar"), &vm, &se);
         let v_str = encode(&HolonAST::string("foo/bar"), &vm, &se);
@@ -864,16 +834,14 @@ mod tests {
 
     #[test]
     fn keyword_distinct_from_symbol_at_type_level() {
-        // Per arc 221: Keyword("foo") uses PRIM_TAG_KEYWORD; Symbol(":foo")
-        // uses PRIM_TAG_STRING. They are distinct at the canonical-bytes
-        // AND vector level. This replaces the pre-arc-221 test
-        // `keyword_vs_prefixed_string_at_symbol_layer` which asserted equality
-        // under the old Symbol(":foo") convention.
+        // Arc 230: keyword("foo") = Bind(Atom("Keyword"), Atom("foo"));
+        // symbol(":foo") = Bind(Atom("Symbol"), Atom(":foo")).
+        // Classifier atoms differ → distinct canonical bytes + vectors.
         let (vm, se) = fresh_env();
         let v_kw = encode(&HolonAST::keyword("foo"), &vm, &se);
         let v_sym = encode(&HolonAST::symbol(":foo"), &vm, &se);
         assert_ne!(v_kw, v_sym,
-            "Keyword(\"foo\") and Symbol(\":foo\") must be distinct after arc 221");
+            "keyword(\"foo\") and symbol(\":foo\") must be distinct (arc 230)");
     }
 
     #[test]
@@ -1266,25 +1234,31 @@ mod tests {
 
     #[test]
     fn char_distinct_from_symbol() {
-        // Char('a') and Symbol("a") MUST produce distinct canonical bytes.
+        // Char('a') is a raw Char leaf; symbol("a") = Bind(Atom("Symbol"), Atom("a")).
+        // Structurally distinct — Char leaf vs Bind composition.
         let char_bytes = canonical_edn_holon(&HolonAST::char_('a'));
         let sym_bytes = canonical_edn_holon(&HolonAST::symbol("a"));
         assert_ne!(
             char_bytes,
             sym_bytes,
-            "Char('a') and Symbol(\"a\") MUST differ in canonical bytes"
+            "char_('a') and symbol(\"a\") MUST differ in canonical bytes (arc 230)"
         );
     }
 
-    // ─── Keyword / Nil / Tag leaf tests (arc 221 Stone 221.3) ───────────
+    // ─── Keyword / Nil / Tag composition tests (arc 230 supersession) ───
+    //
+    // Arc 221 minted HolonAST::Keyword/Nil/Tag variants; arc 230 supersedes
+    // with Bind(Atom(String(cls)), Atom(String(val))) compositions.
+    // Tests updated accordingly — no direct variant pattern matching.
 
     #[test]
-    fn keyword_leaf_round_trip() {
+    fn keyword_composition_round_trip() {
+        // Arc 230: keyword() produces Bind composition; as_keyword() recognises it.
         let h = HolonAST::keyword("foo");
-        assert_eq!(h, HolonAST::Keyword(Arc::from("foo")));
-        // Leading colon stripped
+        assert_eq!(h.as_keyword(), Some("foo"));
+        // Leading colon stripped — both produce the same composition.
         assert_eq!(HolonAST::keyword(":foo"), HolonAST::keyword("foo"));
-        // Hash determinism
+        // Hash determinism: same composition → same hash.
         let mut h1 = std::collections::hash_map::DefaultHasher::new();
         h.hash(&mut h1);
         let mut h2 = std::collections::hash_map::DefaultHasher::new();
@@ -1293,10 +1267,13 @@ mod tests {
     }
 
     #[test]
-    fn nil_leaf_round_trip() {
+    fn nil_composition_round_trip() {
+        // Arc 230: nil() produces Symbol("nil") composition; is_nil() recognises it.
         let h = HolonAST::nil();
-        assert_eq!(h, HolonAST::Nil);
-        // Hash determinism
+        assert!(h.is_nil());
+        // Two nil() calls produce equal compositions.
+        assert_eq!(h, HolonAST::nil());
+        // Hash determinism.
         let mut h1 = std::collections::hash_map::DefaultHasher::new();
         h.hash(&mut h1);
         let mut h2 = std::collections::hash_map::DefaultHasher::new();
@@ -1305,48 +1282,55 @@ mod tests {
     }
 
     #[test]
-    fn tag_leaf_round_trip() {
+    fn tag_composition_round_trip() {
+        // Arc 230: tag() produces Bind composition; as_tag() recognises it.
         let h = HolonAST::tag("uuid");
-        assert_eq!(h, HolonAST::Tag(Arc::from("uuid")));
-        // Leading # stripped
+        assert_eq!(h.as_tag(), Some("uuid"));
+        // Leading # stripped — both produce the same composition.
         assert_eq!(HolonAST::tag("#uuid"), HolonAST::tag("uuid"));
     }
 
     #[test]
     fn keyword_distinct_from_symbol() {
+        // Keyword("foo") = Bind(Atom("Keyword"), Atom("foo"))
+        // Symbol("foo") = Bind(Atom("Symbol"), Atom("foo"))
+        // Classifier atoms differ → distinct canonical bytes + vectors.
         let kw_bytes = canonical_edn_holon(&HolonAST::keyword("foo"));
         let sym_bytes = canonical_edn_holon(&HolonAST::symbol("foo"));
         assert_ne!(kw_bytes, sym_bytes,
-            "Keyword(\"foo\") and Symbol(\"foo\") MUST differ in canonical bytes");
+            "keyword(\"foo\") and symbol(\"foo\") MUST differ in canonical bytes");
     }
 
     #[test]
-    fn nil_distinct_from_symbol_nil() {
-        // The pre-arc-221 convention encoded nil as Symbol("nil").
-        // Now Nil MUST differ from Symbol("nil") byte-for-byte.
+    fn nil_equals_symbol_nil() {
+        // Arc 230: nil() = symbol("nil") = Bind(Atom("Symbol"), Atom("nil")).
+        // This is the honest encoding per user 2026-05-22 articulation.
         let nil_bytes = canonical_edn_holon(&HolonAST::nil());
         let sym_nil_bytes = canonical_edn_holon(&HolonAST::symbol("nil"));
-        assert_ne!(nil_bytes, sym_nil_bytes,
-            "Nil and Symbol(\"nil\") MUST differ in canonical bytes");
+        assert_eq!(nil_bytes, sym_nil_bytes,
+            "nil() and symbol(\"nil\") MUST be identical compositions post-arc-230");
     }
 
     #[test]
     fn tag_distinct_from_symbol() {
+        // Tag("uuid") = Bind(Atom("Tag"), Atom("uuid"))
+        // Symbol("uuid") = Bind(Atom("Symbol"), Atom("uuid"))
+        // Classifier atoms differ → distinct canonical bytes.
         let tag_bytes = canonical_edn_holon(&HolonAST::tag("uuid"));
         let sym_bytes = canonical_edn_holon(&HolonAST::symbol("uuid"));
-        let sym_hashed_bytes = canonical_edn_holon(&HolonAST::symbol("#uuid"));
         assert_ne!(tag_bytes, sym_bytes,
-            "Tag(\"uuid\") and Symbol(\"uuid\") MUST differ in canonical bytes");
-        assert_ne!(tag_bytes, sym_hashed_bytes,
-            "Tag(\"uuid\") and Symbol(\"#uuid\") MUST differ in canonical bytes");
+            "tag(\"uuid\") and symbol(\"uuid\") MUST differ in canonical bytes");
     }
 
     #[test]
     fn keyword_distinct_from_nil() {
+        // Keyword("nil") = Bind(Atom("Keyword"), Atom("nil"))
+        // nil() = Bind(Atom("Symbol"), Atom("nil"))
+        // Classifier atoms differ → distinct.
         let kw_bytes = canonical_edn_holon(&HolonAST::keyword("nil"));
         let nil_bytes = canonical_edn_holon(&HolonAST::nil());
         assert_ne!(kw_bytes, nil_bytes,
-            "Keyword(\"nil\") and Nil MUST differ in canonical bytes");
+            "keyword(\"nil\") and nil() MUST differ in canonical bytes");
     }
 
     #[test]
@@ -1354,7 +1338,7 @@ mod tests {
         let tag_bytes = canonical_edn_holon(&HolonAST::tag("foo"));
         let kw_bytes = canonical_edn_holon(&HolonAST::keyword("foo"));
         assert_ne!(tag_bytes, kw_bytes,
-            "Tag(\"foo\") and Keyword(\"foo\") MUST differ in canonical bytes");
+            "tag(\"foo\") and keyword(\"foo\") MUST differ in canonical bytes");
     }
 
     #[test]
@@ -1370,7 +1354,9 @@ mod tests {
     fn as_keyword_returns_content_without_colon() {
         assert_eq!(HolonAST::keyword("foo").as_keyword(), Some("foo"));
         assert_eq!(HolonAST::keyword(":foo").as_keyword(), Some("foo"));
+        // symbol("foo") has classifier "Symbol", not "Keyword" → None.
         assert_eq!(HolonAST::symbol("foo").as_keyword(), None);
+        // nil() = symbol("nil") → as_keyword() returns None (wrong classifier).
         assert_eq!(HolonAST::nil().as_keyword(), None);
     }
 
@@ -1378,34 +1364,58 @@ mod tests {
     fn as_tag_returns_content_without_hash() {
         assert_eq!(HolonAST::tag("uuid").as_tag(), Some("uuid"));
         assert_eq!(HolonAST::tag("#uuid").as_tag(), Some("uuid"));
+        // symbol("uuid") has classifier "Symbol" → as_tag() returns None.
         assert_eq!(HolonAST::symbol("uuid").as_tag(), None);
     }
 
-    // ─── Symbol/String canonical-bytes seed distinction (arc 221 Stone 221.5) ──
+    // ─── Symbol/String canonical-bytes distinction (arc 230 supersession) ─
+    //
+    // Arc 221 Stone 221.5 used PRIM_TAG_SYMBOL vs PRIM_TAG_STRING.
+    // Arc 230: symbol() = Bind(Atom("Symbol"), Atom(s)) — structurally
+    // distinct from bare String(s) because Bind ≠ leaf-atom shape.
 
     #[test]
     fn symbol_string_canonical_bytes_distinct() {
-        // Stone 221.5: PRIM_TAG_SYMBOL ("symbol") distinct from PRIM_TAG_STRING ("String").
-        // Symbol("x") and String("x") MUST produce distinct canonical bytes.
+        // Arc 230: symbol("x") = Bind(Atom("Symbol"), Atom("x")).
+        // String("x") = String leaf. Structurally distinct.
         let sym_bytes = canonical_edn_holon(&HolonAST::symbol("x"));
         let str_bytes = canonical_edn_holon(&HolonAST::string("x"));
         assert_ne!(
             sym_bytes,
             str_bytes,
-            "Symbol(\"x\") and String(\"x\") MUST differ in canonical bytes (Stone 221.5)"
+            "symbol(\"x\") and string(\"x\") MUST differ in canonical bytes (arc 230)"
         );
     }
 
     #[test]
     fn symbol_string_vectors_distinct() {
-        // Stone 221.5: Symbol and String produce distinct VSA vectors at matched content.
+        // Arc 230: symbol("x") and string("x") produce distinct VSA vectors.
+        // Distinction comes from Bind structure (not PRIM_TAG_SYMBOL seed).
         let (vm, se) = fresh_env();
         let v_sym = encode(&HolonAST::symbol("x"), &vm, &se);
         let v_str = encode(&HolonAST::string("x"), &vm, &se);
         assert_ne!(
             v_sym,
             v_str,
-            "Symbol(\"x\") and String(\"x\") MUST produce distinct vectors (Stone 221.5)"
+            "symbol(\"x\") and string(\"x\") MUST produce distinct vectors (arc 230)"
         );
+    }
+
+    #[test]
+    fn vsa_identity_no_collision_between_classifiers() {
+        // STOP-8 check: arc 230 requires that Symbol("foo") and Keyword("foo")
+        // produce distinct VSA vectors under the new Bind-composition encoding.
+        // The classifier atom ("Symbol" vs "Keyword") is the discriminator.
+        let (vm, se) = fresh_env();
+        let v_sym = encode(&HolonAST::symbol("foo"), &vm, &se);
+        let v_kw = encode(&HolonAST::keyword("foo"), &vm, &se);
+        let v_tag = encode(&HolonAST::tag("foo"), &vm, &se);
+        let v_nil = encode(&HolonAST::nil(), &vm, &se);
+        assert_ne!(v_sym, v_kw, "symbol(\"foo\") must not collide with keyword(\"foo\")");
+        assert_ne!(v_sym, v_tag, "symbol(\"foo\") must not collide with tag(\"foo\")");
+        assert_ne!(v_kw, v_tag, "keyword(\"foo\") must not collide with tag(\"foo\")");
+        // nil = symbol("nil"); keyword("nil") is distinct.
+        let v_kw_nil = encode(&HolonAST::keyword("nil"), &vm, &se);
+        assert_ne!(v_nil, v_kw_nil, "nil() must not collide with keyword(\"nil\")");
     }
 }

@@ -1100,7 +1100,9 @@ mod tests {
 
         let labels = r.labels();
         assert_eq!(labels.len(), 3);
-        assert!(matches!(r.label_ast(labels[0]), Some(HolonAST::Keyword(_))));
+        // Arc 230: keyword("Win") is Bind(Atom(String("Keyword")), Atom(String("Win"))).
+        // Use as_keyword() to recognise the composition shape.
+        assert!(r.label_ast(labels[0]).and_then(|h| h.as_keyword()).is_some());
         assert!(matches!(r.label_ast(labels[2]), Some(HolonAST::Bind(_, _))));
         // Out-of-range handle → None.
         assert!(r.label_ast(Label::from_index(99)).is_none());
