@@ -1,0 +1,23 @@
+# The toolchain, pinned — ONE number, so this repo and its consumers agree.
+#
+# WHY. On 2026-07-30 wat-rs's CI ran to completion for the first time and disagreed
+# with local: identical test results, but clippy was 0 locally and 5 errors in CI.
+# Neither side was misconfigured — BOTH were on "stable". CI installs CURRENT stable
+# every run; a dev box has whatever stable it last pulled, and rustup never updates
+# itself. The box was on 1.93.0, the runner on 1.97.0, with nothing anywhere recording
+# the gap. "stable" is not a version; it is a moving pointer that means different
+# things in different places at the same instant.
+#
+# holon-rs is consumed by wat-rs as a path dependency, so it is ALREADY compiled by
+# whatever toolchain wat-rs pins. This file makes holon-rs's OWN builds and tests agree
+# with that instead of tracking a separate pointer.
+#
+# VERIFIED at the pin: `cargo +1.97.0 build --release` clean; `cargo +1.97.0 test
+# --release` 271 passed + 19 passed, 0 failed.
+#
+# Do NOT set channel = "stable" — that restores exactly the drift this file kills.
+# Bumping is a one-line commit, which is the point: new lints arrive inside a
+# deliberate change instead of as a surprise from a runner.
+[toolchain]
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]
