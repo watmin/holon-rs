@@ -86,6 +86,16 @@ impl Similarity {
     /// Raw dot product.
     #[cfg(feature = "simd")]
     pub fn dot(a: &Vector, b: &Vector) -> f64 {
+        // Arc 278 the dimension-heresy strike — make this path agree with its
+        // scalar twin `dot_raw` below. This used to `unwrap_or(0.0)` a
+        // dimension-mismatched pair; a 0.0 out of cosine reads as
+        // "orthogonal, unrelated" and sails through `> 0.9` as a confident
+        // no-match — a mask, not a result. Assert like `dot_raw` does.
+        assert_eq!(
+            a.dimensions(),
+            b.dimensions(),
+            "Dimension mismatch in dot product"
+        );
         use simsimd::SpatialSimilarity;
         i8::dot(a.data(), b.data()).unwrap_or(0.0)
     }
