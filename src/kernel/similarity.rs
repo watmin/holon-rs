@@ -58,7 +58,25 @@ impl Similarity {
         use simsimd::SpatialSimilarity;
         // Use SIMD dot products to compute cosine similarity
         // cosine = dot(a,b) / sqrt(dot(a,a) * dot(b,b))
-        let dot_ab = i8::dot(a.data(), b.data()).unwrap_or(0.0);
+        //
+        // Arc 278 — the dimension-heresy strike, COMPLETED. The cross term goes
+        // through `Self::dot`, which asserts dimension equality, rather than
+        // calling `i8::dot(..).unwrap_or(0.0)` inline. Routing through the one
+        // door means dimension policy is decided in exactly ONE place per feature
+        // arm (simd: `Self::dot`; scalar: `dot_raw`), so this can never drift from
+        // its twin again.
+        //
+        // What it used to do, and why that was the worst available failure: an
+        // `unwrap_or(0.0)` on a dimension-mismatched pair returned 0.0, which in
+        // cosine's own codomain MEANS "orthogonal, unrelated" — a confident answer
+        // manufactured for a comparison that has none, sailing through `> 0.9` as
+        // a no-match. And it diverged by feature flag: the scalar arm panicked via
+        // `dot_raw` while this one lied silently, so the same input gave different
+        // behaviour depending on how the crate was compiled.
+        //
+        // The self-pairs below stay inline deliberately: `dot(a,a)` and `dot(b,b)`
+        // cannot mismatch, so asserting on them would be an unreachable arm.
+        let dot_ab = Self::dot(a, b);
         let dot_aa = i8::dot(a.data(), a.data()).unwrap_or(0.0);
         let dot_bb = i8::dot(b.data(), b.data()).unwrap_or(0.0);
 
@@ -587,5 +605,52 @@ mod tests {
     #[test]
     fn test_significance_zero_dims() {
         assert_eq!(Similarity::significance(0.5, 0), 0.0);
+    }
+
+    // ── Arc 278 — the dimension-heresy strike, cosine half ────────────────────
+    //
+    // These three run IDENTICALLY under `--features simd` and without it. That is
+    // the point: the defect they gate was a FEATURE-FLAG DIVERGENCE — the scalar
+    // arm panicked via `dot_raw` while the SIMD arm returned `unwrap_or(0.0)`, and
+    // 0.0 in cosine's codomain MEANS "orthogonal, unrelated". Same input, two
+    // behaviours, decided by how the crate was compiled.
+    //
+    // ⚠ RUN THEM IN BOTH CONFIGURATIONS. A single `cargo test` exercises only one
+    // arm; the other is `#[cfg]`-ed out and cannot fail. This is the trap the `dot`
+    // half of this strike already taught once.
+
+    #[test]
+    #[should_panic(expected = "Dimension mismatch")]
+    fn cosine_refuses_mismatched_dimensions() {
+        // The regression itself. Before the fix this returned 0.0 under `simd` —
+        // a confident "unrelated" for a comparison that has no answer.
+        let a = Vector::from_data(vec![1, -1, 1, -1]);
+        let b = Vector::from_data(vec![1, -1, 1]);
+        let _ = Similarity::cosine(&a, &b);
+    }
+
+    #[test]
+    #[should_panic(expected = "Dimension mismatch")]
+    fn dot_refuses_mismatched_dimensions() {
+        // The twin, already fixed — pinned so the two cannot drift apart again.
+        let a = Vector::from_data(vec![1, -1, 1, -1]);
+        let b = Vector::from_data(vec![1, -1, 1]);
+        let _ = Similarity::dot(&a, &b);
+    }
+
+    #[test]
+    fn cosine_still_answers_on_matched_dimensions() {
+        // NON-VACUITY. Without this, both tests above would pass just as happily
+        // if `cosine` panicked on EVERY input — a guard that refuses everything
+        // proves nothing about the guard. Genuine unrelatedness must also stay
+        // distinguishable from the old sentinel: it reads near, but not exactly,
+        // zero, which is precisely why an exact 0.0 was a mask rather than a value.
+        let a = Vector::from_data(vec![1, -1, 1, -1]);
+        let b = Vector::from_data(vec![1, -1, 1, -1]);
+        assert!((Similarity::cosine(&a, &b) - 1.0).abs() < 1e-9, "identical vectors are parallel");
+
+        let c = Vector::from_data(vec![1, -1, 1, -1]);
+        let d = Vector::from_data(vec![-1, 1, -1, 1]);
+        assert!((Similarity::cosine(&c, &d) + 1.0).abs() < 1e-9, "opposite vectors are anti-parallel");
     }
 }
