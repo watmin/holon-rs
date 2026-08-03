@@ -44,7 +44,7 @@ pub use encoder::{Encoder, SequenceMode};
 pub use holon_ast::{canonical_edn_holon, encode, HolonAST};
 pub use primitives::{AttendMode, GateMode, NegateMethod, Primitives, SegmentMethod};
 pub use scalar::{ScalarEncoder, ScalarMode};
-pub use similarity::{Metric, Similarity};
+pub use similarity::{Metric, Similarity, DEGENERATE_EPSILON};
 pub use vector::Vector;
 pub use vector_manager::VectorManager;
 pub use walkable::{

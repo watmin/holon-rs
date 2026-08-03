@@ -5,6 +5,17 @@
 
 use super::vector::Vector;
 
+/// Arc 278 the cosine outcome wall (wat-rs `BRIEF-cosine-outcome-wall.md`) —
+/// the zero-magnitude threshold `Similarity::cosine`'s guard uses to decide a
+/// vector is degenerate (no direction, so no cosine). Was a bare `1e-10`
+/// literal duplicated across both feature arms below; named and exported so
+/// wat-rs can test each operand's own norm against the SAME threshold before
+/// calling `cosine` (rather than duplicating the literal, which could drift
+/// and let the old mask back in — wat says "not degenerate", calls cosine,
+/// this guard disagrees and returns `0.0` anyway). No signature change, no
+/// behaviour change — this is the same threshold, merely named.
+pub const DEGENERATE_EPSILON: f64 = 1e-10;
+
 /// Available similarity metrics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Metric {
@@ -81,7 +92,7 @@ impl Similarity {
         let dot_bb = i8::dot(b.data(), b.data()).unwrap_or(0.0);
 
         let norm_product = (dot_aa * dot_bb).sqrt();
-        if norm_product < 1e-10 {
+        if norm_product < DEGENERATE_EPSILON {
             return 0.0;
         }
 
@@ -94,7 +105,7 @@ impl Similarity {
         let norm_a = a.norm();
         let norm_b = b.norm();
 
-        if norm_a < 1e-10 || norm_b < 1e-10 {
+        if norm_a < DEGENERATE_EPSILON || norm_b < DEGENERATE_EPSILON {
             return 0.0;
         }
 

@@ -69,6 +69,7 @@ pub use highlevel::Holon;
 pub use kernel::{
     Accumulator, AttendMode, Encoder, GateMode, Metric, NegateMethod, Primitives, ScalarEncoder,
     ScalarMode, SegmentMethod, SequenceMode, Similarity, Vector, VectorManager,
+    DEGENERATE_EPSILON,
 };
 pub use kernel::{ScalarRef, ScalarValue, TimeResolution, WalkType, Walkable, WalkableRef, WalkableValue};
 
